@@ -270,7 +270,7 @@ The `-comp xz` flag uses XZ compression for a smaller ISO size. The process may 
 Ubuntu checks the size of the squashfs against a recorded value. Update it:
 
 ```bash
-sudo du -sx --block-size=1 extracted/casper/filesystem.squashfs | cut -f1 > extracted/casper/filesystem.size
+sudo du -sx --block-size=1 extracted/casper/filesystem.squashfs | cut -f1 | sudo tee extracted/casper/filesystem.size
 ```
 
 ### Update MD5 Checksums
