@@ -1,8 +1,8 @@
-# Kernel Implant on Linux Operating Systems (Installer ISO): Filesystem Layer Injection of a Self-Cleaning Rootkit Dropper for Root Execution on Live and Installed Systems
+# Kernel Implant on Linux Operating Systems (Installer ISO): Filesystem Layer Injection of a Rootkit Dropper for Root Execution on Live and Installed Systems
 
 ## Overview
 
-I modified an Ubuntu Desktop 24.04.1 LTS ISO by baking a compiled ELF rootkit dropper (`implant`) and a native systemd unit directly into the live filesystem's **base layer** (`casper/minimal.squashfs`). Because this base layer is the one Casper overlays at boot for the Live session **and** the one the installer writes to the target disk under the default install source, the dropper executes automatically as root on every boot of the modified media whether the user picks "Try Ubuntu" or completes an install. Once the rootkit confirms successful installation, the dropper deletes itself from disk, leaving no first-stage artifact behind.
+I modified an Ubuntu Desktop LTS ISO by baking a compiled ELF rootkit dropper (`implant`) and a native systemd unit directly into the live filesystem's **base layer** (`casper/minimal.squashfs`). Because this base layer is the one Casper overlays at boot for the Live session **and** the one the installer writes to the target disk under the default install source, the dropper executes automatically as root on every boot of the modified media whether the user picks "Try Ubuntu" or completes an install. Once the rootkit confirms successful installation, the dropper deletes itself from disk, leaving no first-stage artifact behind.
 
 The method itself is not Ubuntu-specific. Ubuntu's live media is built on Casper, which overlays a set of SquashFS images as `/` and runs systemd units from `/etc/systemd/system/`. Any Casper-based Ubuntu-derived ISO that uses the same layered squashfs scheme and systemd structure can be treated the same way. I targeted Ubuntu 24.04.1 Desktop because that was the system I had in front of me, and the guide below is written against that target.
 
