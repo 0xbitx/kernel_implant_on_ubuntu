@@ -673,6 +673,14 @@ qemu-system-x86_64 -m 4096 -cdrom custom-ubuntu-implant.iso -boot d \
 
 With KVM enabled, the VM runs at near-native speed.
 
+<p align="center"><strong>Actual live video (installed boot mode)</strong></p>
+
+https://github.com/user-attachments/assets/195bdc10-5c22-4bb0-8cc6-4fb1ec58efdd
+
+<p align="center"><strong>Actual live video (live boot mode)</strong></p>
+
+https://github.com/user-attachments/assets/5196a060-ccb0-4125-919e-c7a05d86b3da
+
 ### Verifying the Installed System
 
 The critical test is not the Live session, it is the installed system. After installation completes and the machine reboots from disk, I checked the target disk from outside:
